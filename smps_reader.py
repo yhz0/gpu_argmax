@@ -58,7 +58,6 @@ class SMPSReader:
         lb_y (np.ndarray): Lower bounds for stage 2 variables.
         ub_y (np.ndarray): Upper bounds for stage 2 variables.
         y_bounded_indices_orig (np.ndarray): Original Gurobi indices of stage 2 vars with non-trivial bounds.
-        pi_dim (int): Dimension of the full 2nd-stage dual vector (rows + bounds).
         rhs_distributions (Dict[int, List[Tuple[float, float]]]):
              Maps original Gurobi constraint index to its discrete distribution.
         stochastic_rows_indices_orig (np.ndarray): Original Gurobi indices of constraints with stochastic RHS.
@@ -129,7 +128,6 @@ class SMPSReader:
 
         # Dual / Bound Information
         self.y_bounded_indices_orig = np.array([], dtype=int)
-        self.pi_dim: int = 0
 
         # Stochastic information (RHS distributions)
         self.rhs_distributions: Dict[int, List[Tuple[float, float]]] = {}
@@ -444,9 +442,6 @@ class SMPSReader:
             else:
                  self.y_bounded_indices_orig = np.array([], dtype=int)
 
-            self.pi_dim = len(self.row2_indices) + len(self.y_bounded_indices_orig)
-            print(f"  Calculated full second-stage dual dimension (pi_dim): {self.pi_dim}")
-
             # --- Calculate Relative Stochastic Indices & short_r_bar ---
             print("Calculating relative indices and short_r_bar for stochastic rows...")
             # Ensure stochastic rows are actually stage 2 rows
@@ -592,7 +587,6 @@ class SMPSReader:
             'stage2_constr_names': self.stage2_constr_names,
             # Dual / Bound Info
             'y_bounded_indices_orig': self.y_bounded_indices_orig,
-            'pi_dim': self.pi_dim,
             # Stochastic Info
             'rhs_distributions': self.rhs_distributions,
             'stochastic_rows_indices_orig': self.stochastic_rows_indices_orig,
@@ -641,7 +635,6 @@ if __name__ == '__main__':
                 print(f"Stage 1 Constraints (Ax R1 b): {len(reader.stage1_constr_names)} (Indices: {len(template['row1_indices'])})")
                 print(f"Stage 2 Variables (y): {len(reader.stage2_var_names)} (Indices: {len(template['y_indices'])})")
                 print(f"Stage 2 Constraints (Cx + Dy R2 r_bar): {len(reader.stage2_constr_names)} (Indices: {len(template['row2_indices'])})")
-                print(f"Second Stage Dual Dimension (pi_dim): {template['pi_dim']}")
                 print(f"Num Stage 2 Vars w/ Non-Trivial Bounds: {len(template['y_bounded_indices_orig'])}")
 
 
