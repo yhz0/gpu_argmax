@@ -6,6 +6,8 @@ import hashlib
 import time # For basic timing feedback (used in init)
 import math
 from typing import List, Tuple, Dict, Optional, Any
+import threading
+
 
 class ArgmaxOperation:
     """
@@ -55,6 +57,7 @@ class ArgmaxOperation:
         r_sparse_indices_gpu (cp.ndarray): Indices (relative to stage 2 rows) of stochastic rows on GPU.
         short_delta_r_gpu (cp.ndarray): Packed stochastic RHS deviations for scenarios on GPU.
         C_gpu (cpsparse.csr_matrix): Sparse transfer matrix C (stage 2 rows x stage 1 vars) on GPU.
+        _lock (threading.Lock): Lock to ensure thread-safe access to add_pi.
     """
 
     def __init__(self, NUM_STAGE2_ROWS: int, NUM_BOUNDED_VARS: int, NUM_STAGE2_VARS: int,
@@ -187,38 +190,42 @@ class ArgmaxOperation:
         new_cbasis = new_cbasis.astype(self.cbasis_cpu.dtype, copy=False) # int8
 
 
-        # --- Deduplication based only on the (pi, rc) pair ---
-        try:
-             # Concatenate only pi and rc for hashing
-             combined = np.concatenate((np.ascontiguousarray(new_pi), np.ascontiguousarray(new_rc)))
-             pi_rc_hash = hashlib.sha256(combined.tobytes()).hexdigest()
-             if pi_rc_hash in self.pi_rc_hashes: return False
-             self.pi_rc_hashes.add(pi_rc_hash)
-        except Exception as e:
-             print(f"Warning: Could not hash (pi, rc) pair for deduplication. Adding anyway. Error: {e}")
+        # --- Acquire Lock for Critical Section ---
+        with self._lock:
+            # --- Critical Section Start ---
+            # --- Deduplication based only on the (pi, rc) pair ---
+            try:
+                # Concatenate only pi and rc for hashing
+                combined = np.concatenate((np.ascontiguousarray(new_pi), np.ascontiguousarray(new_rc)))
+                pi_rc_hash = hashlib.sha256(combined.tobytes()).hexdigest()
+                if pi_rc_hash in self.pi_rc_hashes: return False
+                self.pi_rc_hashes.add(pi_rc_hash)
+            except Exception as e:
+                print(f"Warning: Could not hash (pi, rc) pair for deduplication. Adding anyway. Error: {e}")
 
-        idx = self.num_pi
-        # Store pi and rc on CPU
-        self.pi_cpu[idx] = new_pi
-        self.rc_cpu[idx] = new_rc
-        # Store basis only on CPU
-        self.vbasis_cpu[idx] = new_vbasis
-        self.cbasis_cpu[idx] = new_cbasis
+            idx = self.num_pi
+            # Store pi and rc on CPU
+            self.pi_cpu[idx] = new_pi
+            self.rc_cpu[idx] = new_rc
+            # Store basis only on CPU
+            self.vbasis_cpu[idx] = new_vbasis
+            self.cbasis_cpu[idx] = new_cbasis
 
-        # Extract the 'short' version from pi using the relative sparse indices
-        if len(self.r_sparse_indices_cpu) > 0:
-             short_new_pi = new_pi[self.r_sparse_indices_cpu]
-        else:
-             short_new_pi = np.array([], dtype=new_pi.dtype)
-        self.short_pi_cpu[idx] = short_new_pi
+            # Extract the 'short' version from pi using the relative sparse indices
+            if len(self.r_sparse_indices_cpu) > 0:
+                short_new_pi = new_pi[self.r_sparse_indices_cpu]
+            else:
+                short_new_pi = np.array([], dtype=new_pi.dtype)
+            self.short_pi_cpu[idx] = short_new_pi
 
-        # Add pi and rc to GPU
-        self.pi_gpu[idx] = cp.asarray(new_pi)
-        self.rc_gpu[idx] = cp.asarray(new_rc)
-        self.short_pi_gpu[idx] = cp.asarray(short_new_pi)
+            # Add pi and rc to GPU
+            self.pi_gpu[idx] = cp.asarray(new_pi)
+            self.rc_gpu[idx] = cp.asarray(new_rc)
+            self.short_pi_gpu[idx] = cp.asarray(short_new_pi)
 
-        self.num_pi += 1
-        return True
+            self.num_pi += 1
+            # --- Critical Section End ---
+            return True
 
     def add_scenarios(self, new_short_r_delta: np.ndarray) -> bool:
         """
