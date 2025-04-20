@@ -419,10 +419,3 @@ class ArgmaxOperation:
         vbasis_val = self.vbasis_cpu[index].copy()
         cbasis_val = self.cbasis_cpu[index].copy()
         return vbasis_val, cbasis_val
-
-# Example Usage Needs Significant Update:
-# - SMPSReader needs to provide NUM_STAGE2_ROWS, NUM_BOUNDED_VARS, NUM_STAGE2_VARS, lb_y_bounded, ub_y_bounded.
-# - Caller needs to get pi, RC, vbasis, cbasis from subproblem solves.
-# - Call add_pi(pi_vector, rc_vector, vbasis_vector, cbasis_vector).
-# - Initialize ArgmaxOperation with the correct arguments.
-# - Interpret the returned alpha as the full alpha.
