@@ -32,7 +32,7 @@ def convert_senses_to_gurobi(sense_chars: np.ndarray) -> np.ndarray:
         raise TypeError(f"Expected numpy array of strings for senses, got dtype {sense_chars.dtype}")
 
 # --- SAA Builder Class ---
-class SAABuilder:``
+class SAABuilder:
     """
     Builds and optionally solves a Sample Average Approximation (SAA) model
     for a two-stage stochastic linear program defined by SMPS files.
