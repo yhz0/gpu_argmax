@@ -4,6 +4,10 @@ import scipy.sparse as sp
 import typing as t
 # import warnings # No longer needed unless adding optional checks
 
+from typing import Tuple, Optional, Union, TYPE_CHECKING
+if TYPE_CHECKING:
+    from smps_reader import SMPSReader
+
 class SecondStageWorker:
     """
     Represents and solves the second-stage problem of a two-stage stochastic LP.
@@ -91,6 +95,46 @@ class SecondStageWorker:
             if hasattr(self, 'env'): self.env.dispose() # Attempt cleanup
             raise
 
+    @classmethod
+    def from_smps_reader(cls, reader: 'SMPSReader') -> 'SecondStageWorker':
+        """
+        Factory method to create a SecondStageWorker instance from a loaded SMPSReader.
+
+        Args:
+            reader: An instance of the SMPSReader class, assumed to have
+                    successfully parsed the SMPS files.
+
+        Returns:
+            A new instance of SecondStageWorker.
+
+        Raises:
+            AttributeError: If the reader instance is missing required attributes,
+                           suggesting it wasn't loaded properly.
+            ValueError: If essential data in the reader appears invalid (e.g., None).
+        """
+        # Check if reader appears loaded (has essential attributes)
+        required_attrs = [
+            'd', 'D', 'sense2', 'lb_y', 'ub_y', 'r_bar', 'C',
+            'stage2_var_names', 'stage2_constr_names',
+            'stochastic_rows_relative_indices', 'model' # Check 'model' as a proxy for successful parsing
+        ]
+        for attr in required_attrs:
+            if not hasattr(reader, attr):
+                raise AttributeError(f"SMPSReader instance is missing required attribute '{attr}'. Was it loaded correctly?")
+
+        return cls(
+            d=reader.d,
+            D=reader.D,
+            sense2=reader.sense2,
+            lb_y=reader.lb_y,
+            ub_y=reader.ub_y,
+            r_bar=reader.r_bar, # Use the reader's stage 2 specific r_bar
+            C=reader.C,
+            stage2_var_names=reader.stage2_var_names,
+            stage2_constr_names=reader.stage2_constr_names,
+            stochastic_rows_relative_indices=reader.stochastic_rows_relative_indices
+        )
+
     def set_x(self, x: np.ndarray):
         """
         Calculates the base RHS h_bar = r_bar - Cx based on first-stage
@@ -108,23 +152,34 @@ class SecondStageWorker:
         # Directly update the Gurobi model's RHS attribute state
         self.constraints.RHS = self._h_bar
 
-    def set_scenario(self, omega: np.ndarray):
+    def set_scenario(self, short_delta_r: np.ndarray):
         """
-        Applies the scenario realization 'omega' to the base RHS. Updates the
-        Gurobi model's RHS attribute directly with the final scenario RHS.
-        Requires `set_x` to have been called previously.
+        Applies scenario deviations (delta_r) to the base RHS h_bar = r_bar - Cx.
+
+        Updates the Gurobi model's RHS attribute directly with the final
+        scenario-specific RHS:
+            rhs[stochastic] = (r_bar - Cx)[stochastic] + short_delta_r
+            rhs[non-stochastic] = (r_bar - Cx)[non-stochastic]
+
+        Requires `set_x` to have been called previously to calculate h_bar.
+
+        Args:
+            short_delta_r: Numpy array of stochastic deviations *relative* to r_bar
+                           for the stochastic constraints only, ordered according to
+                           `stochastic_rows_relative_indices`.
         """
         if self._h_bar is None or self._h_bar_stochastic_part is None:
              raise RuntimeError("`set_x` must be called before `set_scenario` to calculate base RHS.")
 
-        if len(omega) != len(self.stochastic_rows_relative_indices):
-            raise ValueError(f"Dimension mismatch: omega ({len(omega)}) vs stochastic rows ({len(self.stochastic_rows_relative_indices)})")
+        # Check dimensions of the input deviation vector
+        if len(short_delta_r) != len(self.stochastic_rows_relative_indices):
+            raise ValueError(
+                f"Dimension mismatch: short_delta_r ({len(short_delta_r)}) vs "
+                f"stochastic rows ({len(self.stochastic_rows_relative_indices)})"
+            )
 
-        # Calculate final scenario-specific RHS using the stored _h_bar components
-        final_rhs = self._h_bar.copy() # Start from base RHS
-        final_rhs[self.stochastic_rows_relative_indices] = self._h_bar_stochastic_part + omega
-
-        # Directly update the Gurobi model's RHS attribute state
+        final_rhs = self._h_bar.copy() # Start from base RHS (r_bar - Cx)
+        final_rhs[self.stochastic_rows_relative_indices] = self._h_bar_stochastic_part + short_delta_r
         self.constraints.RHS = final_rhs
 
     def solve(self, use_dual_simplex: bool = True, single_thread: bool = True) -> t.Optional[t.Tuple[float, np.ndarray, np.ndarray, np.ndarray]]:

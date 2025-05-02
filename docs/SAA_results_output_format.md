@@ -54,8 +54,9 @@ Contains the primal and dual solution information, **populated only if the model
             * *Compression: gzip*
     * `/solution/dual`:
         * `pi_s` (Dataset, float, shape: `(N, num_cons2)`):
-            * The optimal dual variable values (shadow prices) associated with the second-stage constraints (`Cx + Dy <= r_s`) for each scenario.
-            * Row `s` contains the dual vector `pi` for the second-stage constraints of scenario `s`.
+            * The optimal **unscaled** dual variable values (shadow prices) associated with the second-stage constraints (`Dy <= r_s - Cx`) for each **individual scenario subproblem**.
+            * These are derived by multiplying the dual values obtained from the SAA extensive form solution by the total number of scenarios (N).
+            * Row `s` contains the unscaled dual vector `pi` for the second-stage constraints corresponding to scenario `s`.
             * *Compression: gzip*
 
 ### 4. `/basis` Group
