@@ -512,30 +512,39 @@ class SMPSReader:
 
         return batch_samples
 
-    def get_short_delta_r(self, sampled_stochastic_rhs_single_scenario: np.ndarray) -> np.ndarray:
+    def get_short_delta_r(self, sampled_stochastic_rhs_batch: np.ndarray) -> np.ndarray:
         """
         Calculates deviation delta_r = r(omega)_stochastic - r_bar_stochastic
-        for ONE sampled scenario's stochastic RHS components.
+        for a BATCH of sampled scenarios' stochastic RHS components using broadcasting.
 
         Args:
-            sampled_stochastic_rhs_single_scenario: 1D array of sampled values
-              for stochastic RHS elements (ordered like stochastic_rows_indices_orig).
+            sampled_stochastic_rhs_batch: 2D numpy array where each row represents
+                a sampled scenario for stochastic RHS elements (ordered like
+                stochastic_rows_indices_orig).
+                Shape: (num_scenarios, num_stochastic_elements).
 
         Returns:
-            1D numpy array of delta_r values for the stochastic rows.
+            2D numpy array where each row contains the delta_r values for the
+            corresponding input scenario.
+            Shape: (num_scenarios, num_stochastic_elements).
         """
         if not self._data_loaded or self.short_r_bar is None:
-             raise RuntimeError("Data not loaded or short_r_bar not calculated. Call load_and_extract() first.")
-        if sampled_stochastic_rhs_single_scenario.ndim != 1:
-            raise ValueError(f"Input must be a 1D array, got shape {sampled_stochastic_rhs_single_scenario.shape}")
+            raise RuntimeError("Data not loaded or short_r_bar not calculated. Call load_and_extract() first.")
+
+        # --- Input Validation ---
+        if sampled_stochastic_rhs_batch.ndim != 2:
+            raise ValueError(f"Input must be a 2D array (batch of scenarios), got shape {sampled_stochastic_rhs_batch.shape}")
 
         num_stochastic_elements = len(self.stochastic_rows_indices_orig)
-        if sampled_stochastic_rhs_single_scenario.shape[0] != num_stochastic_elements:
-            raise ValueError(f"Input sample length {sampled_stochastic_rhs_single_scenario.shape[0]} != num stochastic elements {num_stochastic_elements}.")
-        if self.short_r_bar.shape[0] != num_stochastic_elements:
-            raise ValueError(f"short_r_bar length {self.short_r_bar.shape[0]} != num stochastic elements {num_stochastic_elements}.")
+        # Check the second dimension (features/elements per scenario) of the input batch
+        if sampled_stochastic_rhs_batch.shape[1] != num_stochastic_elements:
+            raise ValueError(f"Input batch's second dimension (features/elements: {sampled_stochastic_rhs_batch.shape[1]}) != "
+                             f"expected num stochastic elements ({num_stochastic_elements}).")
 
-        return sampled_stochastic_rhs_single_scenario - self.short_r_bar
+        delta_r_batch = sampled_stochastic_rhs_batch - self.short_r_bar
+
+        return delta_r_batch
+
 
     def print_summary(self):
         """Prints a summary of the loaded problem structure."""
@@ -591,18 +600,3 @@ if __name__ == '__main__':
 
     # --- Print Summary (uses logger) ---
     reader.print_summary()
-
-    # # --- Sample and Print to Screen ---
-    # num_samples_to_show = 5
-    # print(f"\nSampling {num_samples_to_show} stochastic RHS scenarios...") # Use print for direct output
-    # rhs_samples = reader.sample_stochastic_rhs_batch(num_samples_to_show)
-
-    # if rhs_samples.shape[1] > 0: # Check if there are stochastic elements
-    #     print(f"Sampled Stochastic RHS (shape {rhs_samples.shape}):")
-    #     print(f"First scenario sample:\n{rhs_samples[0]}")
-
-    #     # Calculate delta_r for the first sample
-    #     delta_r_first = reader.get_short_delta_r(rhs_samples[0])
-    #     print(f"\nFirst scenario delta_r (Sample - r_bar_stochastic):\n{delta_r_first}")
-    # else:
-    #     print("No stochastic RHS elements found to sample.")

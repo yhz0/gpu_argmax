@@ -113,20 +113,24 @@ class ArgmaxOperation:
         self.r_sparse_indices_gpu = torch.from_numpy(self.r_sparse_indices_cpu).to(dtype=torch.long, device=self.device) # LongTensor for indexing
         self.short_delta_r_gpu = torch.zeros((self.R_SPARSE_LEN, MAX_OMEGA), dtype=torch_dtype, device=self.device)
 
-        # --- Convert C matrix to sparse CSR tensor on device ---
-        print(f"[{time.strftime('%H:%M:%S')}] Converting C to sparse CSR format on {self.device}...")
-        if not scipy.sparse.isspmatrix_csr(C):
-            C = C.tocsr()
-        if C.dtype != np.float32:
-             C = C.astype(np.float32)
+        # --- Calculate C_gpu_fp64_transpose (Transpose of C, float64) ---
+        CT_csr64 = C.transpose().tocsr().astype(np.float64, copy=False)
 
+        self.C_gpu_fp64_transpose = torch.sparse_csr_tensor(
+            torch.from_numpy(CT_csr64.indptr).long().to(self.device),
+            torch.from_numpy(CT_csr64.indices).long().to(self.device),
+            torch.from_numpy(CT_csr64.data).to(dtype=torch.float64, device=self.device),
+            size=CT_csr64.shape, dtype=torch.float64, device=self.device
+        )
+
+        # --- Original code for C_gpu (float32 CSR) ---
+        # Assuming torch_dtype corresponds to torch.float32 here.
+        C_csr32 = C.astype(np.float32, copy=False)
         self.C_gpu = torch.sparse_csr_tensor(
-            crow_indices=torch.from_numpy(C.indptr).to(dtype=torch.int64, device=self.device), # int64 required by torch
-            col_indices=torch.from_numpy(C.indices).to(dtype=torch.int64, device=self.device), # int64 required by torch
-            values=torch.from_numpy(C.data).to(dtype=torch_dtype, device=self.device),
-            size=C.shape,
-            dtype=torch_dtype,
-            device=self.device
+            torch.from_numpy(C_csr32.indptr).long().to(self.device),
+            torch.from_numpy(C_csr32.indices).long().to(self.device),
+            torch.from_numpy(C_csr32.data).to(dtype=torch.float32, device=self.device),
+            size=C_csr32.shape, dtype=torch.float32, device=self.device
         )
 
         # --- Threading Lock ---
@@ -147,7 +151,7 @@ class ArgmaxOperation:
             reader: An initialized and loaded SMPSReader instance.
             MAX_PI: Maximum number of (pi, RC, basis) tuples to store.
             MAX_OMEGA: Maximum number of scenarios to store.
-            scenario_batch_size: Number of scenarios per GPU batch. Defaults to 100,000.
+            scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
 
         Returns:
@@ -419,9 +423,8 @@ class ArgmaxOperation:
             # --- Step 5: Final Coefficient Calculation (float64) ---
             # beta = -E[C^T * pi] = -C^T * Avg_Pi
             # Ensure compatible types for sparse matmul (convert C to float64 for safety)
-            C_gpu_fp64 = self.C_gpu.to(torch.float64)
-            beta_gpu = -torch.matmul(C_gpu_fp64.T, Avg_Pi)
-            del C_gpu_fp64
+            beta_gpu = -torch.matmul(self.C_gpu_fp64_transpose, Avg_Pi)
+
 
             # alpha = E[pi^T * r_bar] + E[s] - E[lambda^T * l] + E[mu^T * u]
             #       = Avg_Pi^T * r_bar + Avg_S - Avg_Lambda^T * l + Avg_Mu^T * u
@@ -450,7 +453,6 @@ class ArgmaxOperation:
                     print(f"    Device VRAM reserved:  {reserved_mem_gb:.2f} GB")
                 except Exception as e:
                     print(f"    Could not get CUDA memory info: {e}")
-
 
             return alpha, beta, best_k_index
 
