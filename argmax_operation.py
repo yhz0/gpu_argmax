@@ -34,7 +34,7 @@ class ArgmaxOperation:
                  C: scipy.sparse.spmatrix,
                  lb_y_bounded: np.ndarray,
                  ub_y_bounded: np.ndarray,
-                 scenario_batch_size: int = 100000,
+                 scenario_batch_size: int = 10000,
                  device: Optional[Union[str, torch.device]] = None):
         """
         Initializes the ArgmaxOperation class.
@@ -138,7 +138,7 @@ class ArgmaxOperation:
     @classmethod
     def from_smps_reader(cls, reader: 'SMPSReader',
                          MAX_PI: int, MAX_OMEGA: int,
-                         scenario_batch_size: int = 100000,
+                         scenario_batch_size: int = 10000,
                          device: Optional[Union[str, torch.device]] = None) -> 'ArgmaxOperation':
         """
         Factory method to create an ArgmaxOperation instance from an SMPSReader.
