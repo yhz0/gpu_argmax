@@ -503,7 +503,7 @@ class SAABuilder:
                     # 3. Extract Dual Multipliers for Stage 2 Constraints (pi_s)
                     if self.num_cons2 > 0 and N > 0 and self.saa_constraints is not None:
                         try:
-                            all_duals = np.array(self.saa_constraints.Pi)
+                            all_duals = np.array(self.saa_constraints.Pi) * self.num_scenarios # Scale by number of scenarios
                             start_idx_pi = self.num_cons1
                             end_idx_pi = start_idx_pi + N * self.num_cons2
                             # Verify length before slicing
