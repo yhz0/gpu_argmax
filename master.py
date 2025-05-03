@@ -161,6 +161,51 @@ class AbstractMasterProblem(ABC):
     def solve(self, set_output_flag: t.Optional[bool] = None, **gurobi_params) -> t.Tuple[t.Optional[np.ndarray], t.Optional[float], int]:
         """
         Solves the current Gurobi master problem (`self.model`) using Gurobi.
+
+        This method optimizes the model in its current state. It's expected
+        that subclasses will have modified `self.model` appropriately (e.g.,
+        by adding cuts or columns via methods like `add_optimality_cut`)
+        before this method is invoked.
+
+        It handles temporary Gurobi parameter settings specified via arguments
+        for the duration of this specific solve call and restores the original
+        settings afterwards.
+
+        Args:
+            set_output_flag (bool | None): Temporarily overrides the model's
+                OutputFlag setting for this solve. If True, turns Gurobi console
+                output on; if False, turns it off. If None (default), the model's
+                current OutputFlag setting is used.
+            **gurobi_params: Accepts additional Gurobi parameters as keyword
+                             arguments (e.g., `Method=1`, `Threads=4`, `Presolve=0`).
+                             These parameters are set only for this specific
+                             solve call and are restored to their previous values
+                             after the solve attempt completes or fails.
+
+        Returns:
+            tuple[np.ndarray | None, float | None, int]: A tuple containing:
+                - x_solution (np.ndarray | None): The optimal values of the core 'x'
+                  variables (from `self.x_vars`) if the solve status is Optimal
+                  (e.g., gp.GRB.OPTIMAL). Returns None otherwise.
+                - objective_value (float | None): The optimal objective function
+                  value of the solved model if the solve status is Optimal.
+                  Returns None otherwise.
+                - status_code (int): The final Gurobi status code from the
+                  `model.optimize()` call (e.g., gp.GRB.OPTIMAL,
+                  gp.GRB.INFEASIBLE, gp.GRB.UNBOUNDED). Returns -999 in case of
+                  uncaught Python exceptions during the solve process, or the
+                  Gurobi error code if a GurobiError occurs during optimize.
+
+        Raises:
+            RuntimeError: If the internal Gurobi model (`self.model`) has not
+                          been created yet (i.e., `create_core_problem` or a
+                          subclass equivalent like `create_benders_problem`
+                          was not called successfully).
+            # Note: Internal GurobiErrors during the optimize call itself or
+            # during temporary parameter setting/restoration are caught within
+            # the method and typically reflected in the returned status code.
+            # Errors during model creation (e.g., invalid parameters passed
+            # via gurobi_params) might still raise GurobiError directly.
         """
         if not self._model_created or self.model is None:
             raise RuntimeError("Core model not created. Call create_core_problem() before solve().")
