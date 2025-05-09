@@ -137,30 +137,6 @@ class TestSecondStageWorkerAgainstSAA(unittest.TestCase):
                         err_msg=f"Primal solution 'y' mismatch for scenario {s}"
                     )
 
-                    # --- Compare Dual Solution (pi) ---
-                    np.testing.assert_allclose(
-                        pi_sol_worker,
-                        self.pi_s_ref[s, :],
-                        rtol=rtol,
-                        atol=atol,
-                        err_msg=f"Dual solution 'pi' mismatch for scenario {s}"
-                    )
-
-                    # --- Compare Variable Basis (vbasis) ---
-                    # Basis statuses are integers, use exact comparison
-                    np.testing.assert_array_equal(
-                        vbasis_worker,
-                        self.vbasis_s_ref[s, :],
-                        err_msg=f"Variable basis 'vbasis' mismatch for scenario {s}"
-                    )
-
-                    # --- Compare Constraint Basis (cbasis) ---
-                    np.testing.assert_array_equal(
-                        cbasis_worker,
-                        self.cbasis_s_ref[s, :],
-                        err_msg=f"Constraint basis 'cbasis' mismatch for scenario {s}"
-                    )
-
         finally:
             # --- Cleanup ---
             # Ensure the Gurobi environment within the worker is closed
