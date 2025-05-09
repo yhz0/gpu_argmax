@@ -51,7 +51,7 @@ class ArgmaxOperation:
             C: SciPy sparse matrix (stage 2 rows x X_DIM).
             lb_y_bounded: 1D np.ndarray of lower bounds for bounded variables.
             ub_y_bounded: 1D np.ndarray of upper bounds for bounded variables.
-            scenario_batch_size: Number of scenarios per GPU batch. Defaults to 100,000.
+            scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
@@ -111,7 +111,7 @@ class ArgmaxOperation:
         self.ub_gpu = torch.from_numpy(ub_y_bounded).to(dtype=torch_dtype, device=self.device)
         self.r_bar_gpu = torch.from_numpy(r_bar).to(dtype=torch_dtype, device=self.device)
         self.r_sparse_indices_gpu = torch.from_numpy(self.r_sparse_indices_cpu).to(dtype=torch.long, device=self.device) # LongTensor for indexing
-        self.short_delta_r_gpu = torch.zeros((self.R_SPARSE_LEN, MAX_OMEGA), dtype=torch_dtype, device=self.device)
+        self.short_delta_r_gpu = torch.zeros((MAX_OMEGA, self.R_SPARSE_LEN), dtype=torch_dtype, device=self.device)
 
         # --- Calculate C_gpu_fp64_transpose (Transpose of C, float64) ---
         CT_csr64 = C.transpose().tocsr().astype(np.float64, copy=False)
@@ -124,7 +124,6 @@ class ArgmaxOperation:
         )
 
         # --- Original code for C_gpu (float32 CSR) ---
-        # Assuming torch_dtype corresponds to torch.float32 here.
         C_csr32 = C.astype(np.float32, copy=False)
         self.C_gpu = torch.sparse_csr_tensor(
             torch.from_numpy(C_csr32.indptr).long().to(self.device),
@@ -237,15 +236,15 @@ class ArgmaxOperation:
         with self._lock:
             # --- Critical Section Start ---
             if self.num_pi >= self.MAX_PI:
-                 # print(f"Warning: MAX_PI ({self.MAX_PI}) reached. Cannot add new solution.")
-                 return False
+                # print(f"Warning: MAX_PI ({self.MAX_PI}) reached. Cannot add new solution.")
+                return False
 
             # --- Deduplication based on the (pi, rc) pair ---
             try:
                 # Concatenate pi and rc vectors for hashing
                 # Ensure they are contiguous for consistent hashing
                 combined_pi_rc = np.concatenate((np.ascontiguousarray(new_pi),
-                                                np.ascontiguousarray(new_rc)))
+                                                 np.ascontiguousarray(new_rc)))
                 current_hash = hashlib.sha256(combined_pi_rc.tobytes()).hexdigest()
                 if current_hash in self.pi_rc_hashes:
                     # print("Debug: Duplicate (pi, rc) pair detected, not adding.")
@@ -281,31 +280,41 @@ class ArgmaxOperation:
     def add_scenarios(self, new_short_r_delta: np.ndarray) -> bool:
         """
         Adds new scenario data (packed delta_r values for stochastic RHS rows).
+        User is expected to provide data with scenarios as rows.
 
         Args:
-            new_short_r_delta: Array of shape (R_SPARSE_LEN, num_new_scenarios).
-
+            new_short_r_delta: Array of shape (num_new_scenarios, R_SPARSE_LEN).
+                               Each row represents a scenario, columns are stochastic elements.
         Returns:
             True if scenarios were added (partially or fully), False otherwise.
         """
-        if new_short_r_delta.ndim != 2 or new_short_r_delta.shape[0] != self.R_SPARSE_LEN:
-            raise ValueError(f"new_short_r_delta shape mismatch. Expected ({self.R_SPARSE_LEN}, N), got {new_short_r_delta.shape}")
-        num_new_scenarios = new_short_r_delta.shape[1]
+        # MODIFIED VALIDATION: Check shape[1] for R_SPARSE_LEN, input is (num_scenarios, R_SPARSE_LEN)
+        if new_short_r_delta.ndim != 2 or new_short_r_delta.shape[1] != self.R_SPARSE_LEN:
+            raise ValueError(f"new_short_r_delta shape mismatch. Expected (num_new_scenarios, {self.R_SPARSE_LEN}), got {new_short_r_delta.shape}")
+        
+        # MODIFIED: num_new_scenarios is now from shape[0]
+        num_new_scenarios = new_short_r_delta.shape[0]
         available_slots = self.MAX_OMEGA - self.num_scenarios
         if num_new_scenarios <= 0 or available_slots <= 0:
+            # print(f"Debug: No new scenarios to add or no available slots. New: {num_new_scenarios}, Available: {available_slots}")
             return False
 
         num_to_add = min(num_new_scenarios, available_slots)
+        
+        new_short_r_delta_to_add = new_short_r_delta # Placeholder for slicing
         if num_to_add < num_new_scenarios:
             print(f"Warning: Exceeds MAX_OMEGA. Adding only {num_to_add} of {num_new_scenarios} new scenarios.")
-            new_short_r_delta = new_short_r_delta[:, :num_to_add]
+            # MODIFIED: Slicing rows from the input
+            new_short_r_delta_to_add = new_short_r_delta[:num_to_add, :]
+        else:
+            new_short_r_delta_to_add = new_short_r_delta # Use as is if it fits
 
-        start_col = self.num_scenarios
-        end_col = self.num_scenarios + num_to_add
+        start_row_idx = self.num_scenarios 
+        end_row_idx = self.num_scenarios + num_to_add
 
-        # Add scenarios to device tensor
-        new_short_r_delta_gpu = torch.from_numpy(new_short_r_delta).to(dtype=self.short_delta_r_gpu.dtype, device=self.device)
-        self.short_delta_r_gpu[:, start_col:end_col] = new_short_r_delta_gpu
+        # Add scenarios to device tensor. Input new_short_r_delta_to_add is already (num_to_add, R_SPARSE_LEN)
+        new_scenario_data_gpu = torch.from_numpy(new_short_r_delta_to_add).to(dtype=self.short_delta_r_gpu.dtype, device=self.device)
+        self.short_delta_r_gpu[start_row_idx:end_row_idx, :] = new_scenario_data_gpu
 
         self.num_scenarios += num_to_add
         return True
@@ -318,6 +327,7 @@ class ArgmaxOperation:
 
         Optimization: Avoids recalculating pi^T * (r_bar - Cx) for every scenario
         by splitting the score calculation into constant and stochastic parts.
+        The stochastic part calculation and argmax are optimized for memory layout.
 
         Args:
             x: The first-stage decision vector (NumPy array, size X_DIM).
@@ -335,16 +345,18 @@ class ArgmaxOperation:
 
         with torch.no_grad(): # Disable gradient tracking
             # --- Prepare device data views ---
-            active_pi_gpu = self.pi_gpu[:self.num_pi]
-            active_rc_gpu = self.rc_gpu[:self.num_pi]
-            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]
-            active_short_delta_r_gpu = self.short_delta_r_gpu[:, :self.num_scenarios]
+            active_pi_gpu = self.pi_gpu[:self.num_pi]  # Shape (num_pi, NUM_STAGE2_ROWS)
+            active_rc_gpu = self.rc_gpu[:self.num_pi]  # Shape (num_pi, NUM_BOUNDED_VARS)
+            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi] # Shape (num_pi, R_SPARSE_LEN)
+            
+            # active_scenario_data_gpu has shape (num_scenarios, R_SPARSE_LEN)
+            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :] 
             x_gpu = torch.from_numpy(x).to(dtype=self.C_gpu.dtype, device=self.device)
 
             # --- Precompute terms constant across ALL scenarios ---
             # 1. Calculate h_bar = r_bar - C*x
-            Cx_gpu = torch.matmul(self.C_gpu, x_gpu) # (NUM_STAGE2_ROWS,)
-            h_bar_gpu = self.r_bar_gpu - Cx_gpu     # (NUM_STAGE2_ROWS,)
+            Cx_gpu = torch.matmul(self.C_gpu, x_gpu) 
+            h_bar_gpu = self.r_bar_gpu - Cx_gpu    
 
             # 2. Calculate pi_k^T * h_bar for all k
             pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu) # (num_pi,)
@@ -353,20 +365,18 @@ class ArgmaxOperation:
             lambda_all_k = torch.clamp(active_rc_gpu, min=0)
             mu_all_k = torch.clamp(-active_rc_gpu, min=0)
 
-            # Ensure bounds are float32 for matmul with float32 lambda/mu
             lb_gpu_f32 = self.lb_gpu.to(torch.float32)
             ub_gpu_f32 = self.ub_gpu.to(torch.float32)
-            lambda_l_term_all_k = torch.matmul(lambda_all_k, lb_gpu_f32) # (num_pi,)
-            mu_u_term_all_k = torch.matmul(mu_all_k, ub_gpu_f32)       # (num_pi,)
+            lambda_l_term_all_k = torch.matmul(lambda_all_k, lb_gpu_f32) 
+            mu_u_term_all_k = torch.matmul(mu_all_k, ub_gpu_f32)      
 
-            # Combine constant terms: score_constant = pi_h_bar - lambda_l + mu_u
             constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k # (num_pi,)
 
             # --- Initialize accumulators (float64 for precision) and result array ---
             total_selected_pi_sum = torch.zeros(self.NUM_STAGE2_ROWS, dtype=torch.float64, device=self.device)
             total_selected_lambda_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
             total_selected_mu_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
-            total_s_sum = torch.zeros((), dtype=torch.float64, device=self.device)
+            total_s_sum = torch.zeros((), dtype=torch.float64, device=self.device) # scalar
             all_best_k_indices = torch.zeros(self.num_scenarios, dtype=torch.int32, device=self.device)
 
             # --- Process scenarios in batches ---
@@ -374,42 +384,47 @@ class ArgmaxOperation:
             print(f"[{time.strftime('%H:%M:%S')}] Processing {self.num_scenarios} scenarios in {num_batches} batches of size {self.scenario_batch_size}...")
 
             for i in range(num_batches):
-                start_idx = i * self.scenario_batch_size
-                end_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
-                current_batch_size = end_idx - start_idx
+                # start_idx and end_idx now refer to scenario indices (rows)
+                start_scenario_idx = i * self.scenario_batch_size
+                end_scenario_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
+                current_batch_size = end_scenario_idx - start_scenario_idx
 
-                batch_short_delta_r = active_short_delta_r_gpu[:, start_idx:end_idx] # (R_SPARSE_LEN, current_batch_size)
+                # batch_scenario_slice has shape (current_batch_size, R_SPARSE_LEN)
+                batch_scenario_slice = active_scenario_data_gpu[start_scenario_idx:end_scenario_idx, :] 
 
                 # --- Step 1 (Batch): Compute Stochastic Score Part ---
-                # stochastic_score_part = pi_k^T * delta_r(omega_i)
-                #                      = short_pi_k^T * short_delta_r(omega_i)
-                stochastic_score_part_batch = torch.matmul(active_short_pi_gpu, batch_short_delta_r) # (num_pi, current_batch_size)
+                # stochastic_score_part = delta_r(omega_i)^T * short_pi_k  (for each omega_i, pi_k pair)
+                # active_short_pi_gpu.T has shape (R_SPARSE_LEN, num_pi)
+                # Resulting stochastic_score_part_batch shape: (current_batch_size, num_pi)
+                stochastic_score_part_batch = torch.matmul(batch_scenario_slice, active_short_pi_gpu.T)
 
                 # --- Step 2 (Batch): Compute Total Score and Select Best k* ---
-                # total_score = constant_score_part (broadcasted) + stochastic_score_part
-                scores_batch = constant_score_part_all_k[:, None] + stochastic_score_part_batch # Broadcast constant part
-                best_k_index_batch = torch.argmax(scores_batch, dim=0) # Find best pi index per scenario in batch
-                del scores_batch # Free memory
-                all_best_k_indices[start_idx:end_idx] = best_k_index_batch.to(torch.int32) # Store indices
+                # constant_score_part_all_k has shape (num_pi,). Broadcasting adds it to each row.
+                # scores_batch shape: (current_batch_size, num_pi)
+                scores_batch = stochastic_score_part_batch + constant_score_part_all_k 
+                # argmax along dim=1 to find best pi_k for each scenario (row)
+                best_k_index_batch = torch.argmax(scores_batch, dim=1) # Shape (current_batch_size,)
+                del scores_batch 
+                all_best_k_indices[start_scenario_idx:end_scenario_idx] = best_k_index_batch.to(torch.int32)
 
                 # --- Step 3 (Batch): Compute s_i = short_pi_k*^T * short_delta_r_i for the best k* ---
-                # We already computed this for all k in stochastic_score_part_batch.
-                # We just need to select the values corresponding to the winning k* for each scenario.
-                batch_scenario_indices = torch.arange(current_batch_size, device=self.device)
-                s_gpu_batch = stochastic_score_part_batch[best_k_index_batch, batch_scenario_indices] # Select s for best k*
-                del stochastic_score_part_batch, batch_scenario_indices # Free memory
+                # Need to select the scores from stochastic_score_part_batch that correspond to the best_k_index_batch
+                batch_indices_for_s = torch.arange(current_batch_size, device=self.device)
+                # Indexing into stochastic_score_part_batch (current_batch_size, num_pi)
+                s_gpu_batch = stochastic_score_part_batch[batch_indices_for_s, best_k_index_batch] # Shape (current_batch_size,)
+                del stochastic_score_part_batch, batch_indices_for_s # Free memory
 
                 # --- Step 4 (Batch): Accumulate Results using float64 ---
                 selected_pi_batch = active_pi_gpu[best_k_index_batch]
-                selected_lambda_batch = lambda_all_k[best_k_index_batch] # Use precomputed lambda_all_k
-                selected_mu_batch = mu_all_k[best_k_index_batch]       # Use precomputed mu_all_k
-                del best_k_index_batch # No longer needed for this batch
+                selected_lambda_batch = lambda_all_k[best_k_index_batch] 
+                selected_mu_batch = mu_all_k[best_k_index_batch]     
+                del best_k_index_batch 
 
                 total_selected_pi_sum += torch.sum(selected_pi_batch, dim=0, dtype=torch.float64)
                 total_selected_lambda_sum += torch.sum(selected_lambda_batch, dim=0, dtype=torch.float64)
                 total_selected_mu_sum += torch.sum(selected_mu_batch, dim=0, dtype=torch.float64)
                 total_s_sum += torch.sum(s_gpu_batch, dtype=torch.float64)
-                del selected_pi_batch, selected_lambda_batch, selected_mu_batch, s_gpu_batch # Free memory
+                del selected_pi_batch, selected_lambda_batch, selected_mu_batch, s_gpu_batch 
 
             # --- Cleanup precomputed tensors ---
             del lambda_all_k, mu_all_k, lambda_l_term_all_k, mu_u_term_all_k
@@ -422,18 +437,13 @@ class ArgmaxOperation:
             Avg_S = total_s_sum / self.num_scenarios
 
             # --- Step 5: Final Coefficient Calculation (float64) ---
-            # beta = -E[C^T * pi] = -C^T * Avg_Pi
-            # Ensure compatible types for sparse matmul (convert C to float64 for safety)
             beta_gpu = -torch.matmul(self.C_gpu_fp64_transpose, Avg_Pi)
 
-
-            # alpha = E[pi^T * r_bar] + E[s] - E[lambda^T * l] + E[mu^T * u]
-            #       = Avg_Pi^T * r_bar + Avg_S - Avg_Lambda^T * l + Avg_Mu^T * u
             r_bar_gpu_fp64 = self.r_bar_gpu.to(torch.float64)
             lb_gpu_fp64 = self.lb_gpu.to(torch.float64)
             ub_gpu_fp64 = self.ub_gpu.to(torch.float64)
 
-            alpha_pi_term = torch.dot(Avg_Pi, r_bar_gpu_fp64) + Avg_S # Note: Avg_S already incorporates pi^T*delta_r
+            alpha_pi_term = torch.dot(Avg_Pi, r_bar_gpu_fp64) + Avg_S 
             alpha_lambda_term = torch.dot(Avg_Lambda, lb_gpu_fp64)
             alpha_mu_term = torch.dot(Avg_Mu, ub_gpu_fp64)
 
@@ -442,11 +452,10 @@ class ArgmaxOperation:
             # --- Return results (transfer to CPU as NumPy arrays) ---
             alpha = alpha_gpu.item()
             beta = beta_gpu.cpu().numpy()
-            best_k_index = all_best_k_indices.cpu().numpy()
+            best_k_index_cpu = all_best_k_indices.cpu().numpy()
 
             print(f"[{time.strftime('%H:%M:%S')}] Cut calculation finished.")
             if self.device.type == 'cuda':
-                # Optional: Add memory reporting if needed
                 try:
                     allocated_mem_gb = torch.cuda.memory_allocated(self.device) / 1024**3
                     reserved_mem_gb = torch.cuda.memory_reserved(self.device) / 1024**3
@@ -455,7 +464,7 @@ class ArgmaxOperation:
                 except Exception as e:
                     print(f"    Could not get CUDA memory info: {e}")
 
-            return alpha, beta, best_k_index
+            return alpha, beta, best_k_index_cpu
 
     # --- Retrieval Methods ---
     def get_basis(self, index: int) -> tuple[np.ndarray, np.ndarray] | None:
@@ -463,8 +472,6 @@ class ArgmaxOperation:
         if not 0 <= index < self.num_pi:
             print(f"Error: Index {index} out of bounds (0 to {self.num_pi - 1})")
             return None
-        # Ensure thread safety if accessed concurrently with add_pi, though typically called after calculate_cut
-        # with self._lock: # Usually not needed here if access pattern is sequential
         vbasis_val = self.vbasis_cpu[index].copy()
         cbasis_val = self.cbasis_cpu[index].copy()
         return vbasis_val, cbasis_val
