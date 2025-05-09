@@ -15,6 +15,7 @@ CLASSES_TO_DOCUMENT = [
     ('second_stage_worker', 'SecondStageWorker'),
     ('master', 'AbstractMasterProblem'),
     ('benders', 'BendersMasterProblem'),
+    ('parallel_second_stage_worker', 'ParallelSecondStageWorker'),
 ]
 
 OUTPUT_FILE = "combined_docstrings.txt"
