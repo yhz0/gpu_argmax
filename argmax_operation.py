@@ -21,7 +21,7 @@ class ArgmaxOperation:
 
     Features:
     - Stores (pi, RC) on target PyTorch device, (vbasis, cbasis) on CPU.
-    - Deduplicates added solutions based on basis (vbasis, cbasis).
+    - Deduplicates added solutions based on the (pi, rc) pair.
     - Processes scenarios in batches for memory efficiency.
     - Uses double precision (float64) for key reduction steps for accuracy.
     - Handles sparse transfer matrix C (torch.sparse_csr_tensor).
@@ -98,7 +98,7 @@ class ArgmaxOperation:
         basis_dtype_np = np.int8 # Compact storage for basis status
         self.vbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_VARS), dtype=basis_dtype_np)
         self.cbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=basis_dtype_np)
-        self.basis_hashes = set() # For deduplication based on basis
+        self.pi_rc_hashes = set() # For deduplication based on (pi, rc) pair
 
         # --- GPU (Device) Data Storage ---
         print(f"[{time.strftime('%H:%M:%S')}] Allocating memory on device {self.device}...")
@@ -208,7 +208,7 @@ class ArgmaxOperation:
                new_vbasis: np.ndarray, new_cbasis: np.ndarray) -> bool:
         """
         Adds a new dual solution (pi, rc) and its basis (vbasis, cbasis).
-        Stores pi/rc on device, basis on CPU. Deduplicates based on basis.
+        Stores pi/rc on device, basis on CPU. Deduplicates based on the (pi, rc) pair.
 
         Args:
             new_pi: Constraint dual vector (NumPy).
@@ -240,18 +240,19 @@ class ArgmaxOperation:
                  # print(f"Warning: MAX_PI ({self.MAX_PI}) reached. Cannot add new solution.")
                  return False
 
-            # --- Deduplication based only on the basis (vbasis, cbasis) pair ---
+            # --- Deduplication based on the (pi, rc) pair ---
             try:
-                # Concatenate basis vectors for hashing
-                combined_basis = np.concatenate((np.ascontiguousarray(new_vbasis),
-                                                 np.ascontiguousarray(new_cbasis)))
-                basis_hash = hashlib.sha256(combined_basis.tobytes()).hexdigest()
-                if basis_hash in self.basis_hashes:
-                    # print("Debug: Duplicate basis detected, not adding.")
+                # Concatenate pi and rc vectors for hashing
+                # Ensure they are contiguous for consistent hashing
+                combined_pi_rc = np.concatenate((np.ascontiguousarray(new_pi),
+                                                np.ascontiguousarray(new_rc)))
+                current_hash = hashlib.sha256(combined_pi_rc.tobytes()).hexdigest()
+                if current_hash in self.pi_rc_hashes:
+                    # print("Debug: Duplicate (pi, rc) pair detected, not adding.")
                     return False
-                self.basis_hashes.add(basis_hash)
+                self.pi_rc_hashes.add(current_hash)
             except Exception as e:
-                print(f"Warning: Could not hash basis pair for deduplication. Adding anyway. Error: {e}")
+                print(f"Warning: Could not hash (pi, rc) pair for deduplication. Adding anyway. Error: {e}")
 
             idx = self.num_pi
 
