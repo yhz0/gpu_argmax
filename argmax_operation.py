@@ -467,11 +467,42 @@ class ArgmaxOperation:
             return alpha, beta, best_k_index_cpu
 
     # --- Retrieval Methods ---
-    def get_basis(self, index: int) -> tuple[np.ndarray, np.ndarray] | None:
-        """Retrieves only the basis (vbasis, cbasis) from CPU for a given index."""
-        if not 0 <= index < self.num_pi:
-            print(f"Error: Index {index} out of bounds (0 to {self.num_pi - 1})")
-            return None
-        vbasis_val = self.vbasis_cpu[index].copy()
-        cbasis_val = self.cbasis_cpu[index].copy()
-        return vbasis_val, cbasis_val
+    def get_basis(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Retrieves the basis (vbasis, cbasis) arrays from CPU for a given 
+        1D NumPy array of indices. Each row in the output arrays corresponds 
+        to an index in the input array.
+
+        Args:
+            indices: A 1D NumPy array of integer indices for which to retrieve the basis.
+
+        Returns:
+            A tuple containing two NumPy arrays:
+            - vbasis_batch (np.ndarray): Array of shape (len(indices), NUM_STAGE2_VARS),
+                                         containing the selected variable basis statuses.
+            - cbasis_batch (np.ndarray): Array of shape (len(indices), NUM_STAGE2_ROWS),
+                                         containing the selected constraint basis statuses.
+        Raises:
+            TypeError: If 'indices' is not a 1D NumPy array of integers.
+            ValueError: If any index is out of bounds [0, self.num_pi - 1).
+        """
+        if not isinstance(indices, np.ndarray) or indices.ndim != 1:
+            raise TypeError("Input 'indices' must be a 1D NumPy array.")
+        if not np.issubdtype(indices.dtype, np.integer):
+            raise TypeError("Elements of 'indices' must be integers.")
+
+        # Check if all requested indices are within the valid range
+        # Valid range is [0, self.num_pi - 1]
+        are_indices_valid = (indices >= 0) & (indices < self.num_pi)
+        
+        if not np.all(are_indices_valid):
+            invalid_indices = indices[~are_indices_valid]
+            raise ValueError(
+                f"One or more indices are out of bounds [0, {self.num_pi - 1}]. "
+                f"Invalid indices found: {invalid_indices.tolist()}"
+            )
+
+        vbasis_batch = self.vbasis_cpu[indices]
+        cbasis_batch = self.cbasis_cpu[indices]
+        
+        return vbasis_batch, cbasis_batch
