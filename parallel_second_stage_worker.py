@@ -35,43 +35,55 @@ def init_worker_process(worker_constructor_args_tuple: tuple, initial_x_for_work
 def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
     """
     Task function executed by worker processes in the pool.
-    It uses the process-global SecondStageWorker to solve a single scenario.
+    It uses the process-global SecondStageWorker to solve a single scenario
+    and returns the results including basis information.
     """
     global _g_worker_instance, _g_current_x_for_worker_process
-    scenario_idx, short_delta_r, vbasis, cbasis, x_from_main_process = task_details
+    scenario_idx, short_delta_r, vbasis_in, cbasis_in, x_from_main_process = task_details
 
     if _g_worker_instance is None:
-        # This should not happen if init_worker_process ran correctly.
         raise RuntimeError(f"Worker not initialized in process {os.getpid()}. This is unexpected.")
 
-    # Sanity check: Ensure the worker's x matches the x intended for this batch.
-    # This should be true if the pool is managed correctly (recreated on x change).
     if not np.array_equal(_g_current_x_for_worker_process, x_from_main_process):
-        # This indicates a potential issue in pool management or stale state.
-        # For robustness, we can re-apply set_x, but it might hide underlying problems.
-        # print(f"Warning in process {os.getpid()}: Worker's x differs from task's x. Re-setting x.") # Debug
         _g_worker_instance.set_x(x_from_main_process)
         _g_current_x_for_worker_process = x_from_main_process.copy()
 
     _g_worker_instance.set_scenario(short_delta_r)
 
-    if vbasis is not None and cbasis is not None:
-        _g_worker_instance.set_basis(vbasis, cbasis)
+    if vbasis_in is not None and cbasis_in is not None:
+        try:
+            _g_worker_instance.set_basis(vbasis_in, cbasis_in)
+        except ValueError as e:
+            # Log or handle if a bad basis is passed; for now, just print a warning
+            print(f"Process {os.getpid()}: Warning - error setting basis for scenario {scenario_idx}: {e}")
 
-    result = _g_worker_instance.solve() # Uses default params (e.g., dual simplex, single thread)
+
+    result = _g_worker_instance.solve() # Uses default params
+
+    # Get dimensions for placeholder arrays if needed
+    num_y = len(_g_worker_instance.d)
+    num_constr = len(_g_worker_instance.r_bar)
+
+    # Initialize output basis as None
+    vbasis_out: Optional[np.ndarray] = None
+    cbasis_out: Optional[np.ndarray] = None
 
     if result:
         obj_val, y_sol, pi_sol, rc_sol = result
-        return scenario_idx, obj_val, y_sol, pi_sol, rc_sol
+        basis_data = _g_worker_instance.get_basis() # Attempt to get the basis
+        if basis_data:
+            vbasis_out, cbasis_out = basis_data
+        # If basis_data is None (e.g., optimal but basis not available), vbasis_out/cbasis_out remain None
+        return scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out
     else:
         # Handle cases where the subproblem solve fails (e.g., infeasible)
-        # Return NaNs or appropriate placeholders. Dimensions are from the worker's setup.
-        num_y = len(_g_worker_instance.d)
-        num_constr = len(_g_worker_instance.r_bar)
         return (scenario_idx, np.nan,
                 np.full(num_y, np.nan, dtype=float),
                 np.full(num_constr, np.nan, dtype=float),
-                np.full(num_y, np.nan, dtype=float))
+                np.full(num_y, np.nan, dtype=float),
+                vbasis_out, # Will be None
+                cbasis_out) # Will be None
+
 
 def update_worker_x_task(new_x_value: np.ndarray) -> int: # Return PID for confirmation
     """
@@ -95,6 +107,7 @@ class ParallelSecondStageWorker:
     A parallel version of SecondStageWorker that manages multiple SecondStageWorker
     instances across different processes to solve batches of second-stage problems.
     """
+    BASIS_NOT_AVAILABLE_PLACEHOLDER: np.int8 = np.int8(-100)
 
     def __init__(self, num_workers: int,
                  d: np.ndarray, D: sp.csr_matrix, sense2: np.ndarray,
@@ -255,52 +268,64 @@ class ParallelSecondStageWorker:
             )
             self._current_x_for_pool = x.copy()
             # print(f"Main process: Pool recreated after x update failure.") # Debug
-
-    # solve_batch method will now call _synchronize_x_with_workers:
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
                     cbasis_batch: Optional[np.ndarray] = None) \
-                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: # Updated return tuple
         if self._closed:
             raise RuntimeError("ParallelSecondStageWorker has been closed.")
 
         num_scenarios = short_delta_r_batch.shape[0]
         if num_scenarios == 0:
-            return (np.array([]),
-                    np.empty((0, self._num_y_vars)),
-                    np.empty((0, self._num_stage2_constrs)),
-                    np.empty((0, self._num_y_vars)))
+            return (np.array([]), # obj_values
+                    np.empty((0, self._num_y_vars), dtype=float), # y_solutions
+                    np.empty((0, self._num_stage2_constrs), dtype=float), # pi_solutions
+                    np.empty((0, self._num_y_vars), dtype=float), # rc_solutions
+                    np.empty((0, self._num_y_vars), dtype=np.int8), # vbasis_all
+                    np.empty((0, self._num_stage2_constrs), dtype=np.int8)) # cbasis_all
 
-        # Synchronize x with all workers (creates pool if needed, updates x if changed)
         self._synchronize_x_with_workers(x)
         if self._pool is None: # Should be initialized by _synchronize_x_with_workers
             raise RuntimeError("Worker pool was not initialized, even after synchronization attempt.")
 
-        # ... rest of the solve_batch method (task preparation, pool.map, result processing)
-        # remains largely the same as in the previous version.
-        # The x.copy() in tasks.append(...) is still useful for the sanity check
-        # within solve_scenario_task_glob_worker.
-
         tasks = []
         for i in range(num_scenarios):
-            vb_i = vbasis_batch[i] if vbasis_batch is not None and len(vbasis_batch) == num_scenarios else None
-            cb_i = cbasis_batch[i] if cbasis_batch is not None and len(cbasis_batch) == num_scenarios else None
-            tasks.append((i, short_delta_r_batch[i], vb_i, cb_i, x.copy())) # x.copy() for verification
+            vb_i = vbasis_batch[i] if vbasis_batch is not None and i < len(vbasis_batch) else None
+            cb_i = cbasis_batch[i] if cbasis_batch is not None and i < len(cbasis_batch) else None
+            tasks.append((i, short_delta_r_batch[i], vb_i, cb_i, x.copy()))
 
         results_from_pool = self._pool.map(solve_scenario_task_glob_worker, tasks)
 
+        # Initialize arrays to store results
         obj_values_all = np.empty(num_scenarios, dtype=float)
         y_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
         pi_solutions_all = np.empty((num_scenarios, self._num_stage2_constrs), dtype=float)
         rc_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
 
-        for scenario_idx, obj_val, y_sol, pi_sol, rc_sol in results_from_pool:
+        # Initialize basis arrays with the placeholder value
+        vbasis_all = np.full((num_scenarios, self._num_y_vars),
+                             fill_value=self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
+        cbasis_all = np.full((num_scenarios, self._num_stage2_constrs),
+                             fill_value=self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
+
+        for result_tuple in results_from_pool:
+            # Unpack results, now including vbasis_out and cbasis_out
+            scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out = result_tuple
+
             obj_values_all[scenario_idx] = obj_val
             y_solutions_all[scenario_idx, :] = y_sol
             pi_solutions_all[scenario_idx, :] = pi_sol
             rc_solutions_all[scenario_idx, :] = rc_sol
 
-        return obj_values_all, y_solutions_all, pi_solutions_all, rc_solutions_all
+            if vbasis_out is not None:
+                vbasis_all[scenario_idx, :] = vbasis_out
+            # Else, it remains the placeholder value
+
+            if cbasis_out is not None:
+                cbasis_all[scenario_idx, :] = cbasis_out
+            # Else, it remains the placeholder value
+
+        return obj_values_all, y_solutions_all, pi_solutions_all, rc_solutions_all, vbasis_all, cbasis_all
 
     def _close_pool_resources(self):
         """Helper to close and join the current pool."""

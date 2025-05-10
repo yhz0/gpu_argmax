@@ -105,7 +105,7 @@ class TestParallelSecondStageWorkerAgainstSAA(unittest.TestCase):
             # The first-stage solution 'x' is common for all scenarios in this batch.
             # The short_delta_r_all contains deviations for all scenarios.
             # No basis information is passed for warm-start in this test, relying on default behavior.
-            obj_vals_batch, y_sols_batch, pi_sols_batch, _rc_sols_batch = \
+            obj_vals_batch, y_sols_batch, pi_sols_batch, rc_sols_batch, vbasis_batch_out, cbasis_batch_out = \
                 parallel_worker.solve_batch(
                     x=self.x_sol_ref,
                     short_delta_r_batch=self.short_delta_r_all
