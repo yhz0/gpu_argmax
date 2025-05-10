@@ -1,3 +1,4 @@
+import warnings
 import gurobipy as gp
 import numpy as np
 import scipy.sparse as sp
@@ -48,11 +49,32 @@ class BendersMasterProblem(AbstractMasterProblem):
         super().__init__(c, A, b, sense1, lb_x, ub_x, var_names, constr_names)
 
         # --- Benders Specific Attributes ---
-        self.eta_lower_bound = eta_lower_bound
         self.eta_name = eta_name
         self.eta_var: gp.Var = None # Will hold the reference to the Gurobi eta variable
         self.optimality_cuts: t.List[gp.Constr] = [] # Stores references to added cut constraints
         self._benders_components_added: bool = False
+
+        self.eta_lower_bound = eta_lower_bound
+        self._eta_bound_explicitly_set: bool = (eta_lower_bound != -gp.GRB.INFINITY)
+
+
+    def set_eta_lower_bound(self, new_lower_bound: float):
+        """
+        Sets or updates the lower bound for the epigraph variable 'eta'.
+
+        If the Gurobi model and 'eta' variable have already been created,
+        this method will update the variable's lower bound directly in the model.
+
+        Args:
+            new_lower_bound: The new lower bound for eta.
+        """
+        self.eta_lower_bound = new_lower_bound
+        self._eta_bound_explicitly_set = True # Mark that it was set by the user
+
+        if self.model is not None and self.eta_var is not None:
+            self.eta_var.lb = new_lower_bound
+            self.model.update()
+
 
     def create_benders_problem(self, model_name: str = "BendersMaster"):
         """
@@ -65,6 +87,17 @@ class BendersMasterProblem(AbstractMasterProblem):
         Args:
             model_name: Name for the Gurobi model.
         """
+
+        # --- Warning for eta_lower_bound ---
+        if not self._eta_bound_explicitly_set and self.eta_lower_bound == -gp.GRB.INFINITY:
+            warnings.warn(
+                f"The lower bound for eta ('{self.eta_name}') is currently -GRB.INFINITY. "
+                "Cuts should be added prior to solving. The model may be unbounded below.",
+                UserWarning
+            )
+            # suppress further warnings
+            self._eta_bound_explicitly_set = True
+
         # 1. Build the core model (min c'x, Ax R1 b, bounds)
         super().create_core_problem(model_name=model_name)
 
@@ -79,7 +112,7 @@ class BendersMasterProblem(AbstractMasterProblem):
                 ub=gp.GRB.INFINITY,
                 obj=1.0, # Makes objective c'x + 1.0*eta
                 vtype=gp.GRB.CONTINUOUS,
-                name=self.eta_name
+                name=self.eta_name,
             )
 
             # 3. Update model (integrates the new variable)
