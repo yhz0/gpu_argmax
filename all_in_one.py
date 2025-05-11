@@ -346,7 +346,7 @@ class SAABuilder:
 
         return SAA_rhs, SAA_sense
 
-    def build_model(self, suppress_gurobi_output: bool = True):
+    def build_model(self, suppress_gurobi_output: bool = False):
         """Builds the Gurobi SAA model object."""
         if self.reader is None:
             self._load_smps_data()
@@ -911,8 +911,8 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     base_dir_main = "smps_data"
-    problem_name_main = "cep"  # Example problem name
-    num_scenarios_main = 100 # Reduced for quicker testing
+    problem_name_main = "ssn"  # Example problem name
+    num_scenarios_main = 5000 # Reduced for quicker testing
     num_threads_main = None # Use Gurobi default or specify (e.g., 4)
     random_seed_main = 42
     output_hdf5_filename = f"{problem_name_main}_{num_scenarios_main}scen_results.h5"
