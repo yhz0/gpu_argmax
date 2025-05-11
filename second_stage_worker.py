@@ -62,6 +62,11 @@ class SecondStageWorker:
         self.stage2_constr_names = stage2_constr_names[:]
         self.stochastic_rows_relative_indices = stochastic_rows_relative_indices.copy()
 
+        # --- Determine nontrivial RC ---
+        has_finite_ub = np.isfinite(ub_y)
+        has_finite_lb = np.isfinite(lb_y) & (np.abs(lb_y) > 1e-9) # Non-zero LB
+        self._rc_mask = np.where(has_finite_ub | has_finite_lb)
+
         # --- Internal state for calculations ---
         # Store calculated base RHS (r_bar - Cx) from set_x for use in set_scenario
         self._h_bar: t.Optional[np.ndarray] = None
@@ -182,7 +187,7 @@ class SecondStageWorker:
         final_rhs[self.stochastic_rows_relative_indices] = self._h_bar_stochastic_part + short_delta_r
         self.constraints.RHS = final_rhs
 
-    def solve(self, use_dual_simplex: bool = True, single_thread: bool = True) -> t.Optional[t.Tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
+    def solve(self, use_dual_simplex: bool = True, single_thread: bool = True, nontrivial_rc_only = True) -> t.Optional[t.Tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
         """
         Solves the second-stage subproblem.
 
@@ -192,6 +197,9 @@ class SecondStageWorker:
         Args:
             use_dual_simplex: If True, forces the dual simplex algorithm.
             single_thread: If True, restricts Gurobi to a single thread.
+            nontrivial_rc_only: If True, only returns reduced costs for variables
+                           with finite bounds (non-trivial). Otherwise, computes
+                           for all variables.
 
         Returns:
             A tuple (objective_value, y_solution, dual_solution_pi, reduced_costs)
@@ -211,7 +219,10 @@ class SecondStageWorker:
             obj_val = self.model.ObjVal
             y_sol = self.y_vars.X
             pi_sol = self.constraints.Pi # Dual values
-            rc_sol = self.y_vars.RC      # Reduced costs
+            if nontrivial_rc_only:
+                rc_sol = self.y_vars.RC[self._rc_mask]
+            else:
+                rc_sol = self.y_vars.RC      # Reduced costs
             return obj_val, y_sol, pi_sol, rc_sol
         else:
             # You might want to log the status for debugging non-optimal solves

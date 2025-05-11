@@ -39,7 +39,7 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
     and returns the results including basis information.
     """
     global _g_worker_instance, _g_current_x_for_worker_process
-    scenario_idx, short_delta_r, vbasis_in, cbasis_in, x_from_main_process = task_details
+    scenario_idx, short_delta_r, vbasis_in, cbasis_in, x_from_main_process, nontrivial_rc_only = task_details
 
     if _g_worker_instance is None:
         raise RuntimeError(f"Worker not initialized in process {os.getpid()}. This is unexpected.")
@@ -58,10 +58,11 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
             print(f"Process {os.getpid()}: Warning - error setting basis for scenario {scenario_idx}: {e}")
 
 
-    result = _g_worker_instance.solve() # Uses default params
+    result = _g_worker_instance.solve(nontrivial_rc_only=nontrivial_rc_only)
 
     # Get dimensions for placeholder arrays if needed
     num_y = len(_g_worker_instance.d)
+    num_rc = len(_g_worker_instance._rc_mask) if nontrivial_rc_only else num_y
     num_constr = len(_g_worker_instance.r_bar)
 
     # Initialize output basis as None
@@ -80,7 +81,7 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
         return (scenario_idx, np.nan,
                 np.full(num_y, np.nan, dtype=float),
                 np.full(num_constr, np.nan, dtype=float),
-                np.full(num_y, np.nan, dtype=float),
+                np.full(num_rc, np.nan, dtype=float),
                 vbasis_out, # Will be None
                 cbasis_out) # Will be None
 
@@ -141,6 +142,11 @@ class ParallelSecondStageWorker:
         # Store dimensions for creating placeholder results for failed solves
         self._num_y_vars = len(d)
         self._num_stage2_constrs = len(r_bar)
+
+        # --- Determine nontrivial RC. Will compute for nontrivial RC only ---
+        has_finite_ub = np.isfinite(ub_y)
+        has_finite_lb = np.isfinite(lb_y) & (np.abs(lb_y) > 1e-9) # Non-zero LB
+        self._rc_mask = np.where(has_finite_ub | has_finite_lb)
 
     @classmethod
     def from_smps_reader(cls, reader: 'SMPSReader', num_workers: int) -> 'ParallelSecondStageWorker':
@@ -270,17 +276,19 @@ class ParallelSecondStageWorker:
             # print(f"Main process: Pool recreated after x update failure.") # Debug
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
-                    cbasis_batch: Optional[np.ndarray] = None) \
+                    cbasis_batch: Optional[np.ndarray] = None, nontrivial_rc_only = True) \
                     -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: # Updated return tuple
         if self._closed:
             raise RuntimeError("ParallelSecondStageWorker has been closed.")
+        
+        rc_length = len(self._rc_mask[0]) if nontrivial_rc_only else self._num_y_vars
 
         num_scenarios = short_delta_r_batch.shape[0]
         if num_scenarios == 0:
             return (np.array([]), # obj_values
                     np.empty((0, self._num_y_vars), dtype=float), # y_solutions
                     np.empty((0, self._num_stage2_constrs), dtype=float), # pi_solutions
-                    np.empty((0, self._num_y_vars), dtype=float), # rc_solutions
+                    np.empty((0, rc_length), dtype=float), # rc_solutions
                     np.empty((0, self._num_y_vars), dtype=np.int8), # vbasis_all
                     np.empty((0, self._num_stage2_constrs), dtype=np.int8)) # cbasis_all
 
@@ -292,7 +300,7 @@ class ParallelSecondStageWorker:
         for i in range(num_scenarios):
             vb_i = vbasis_batch[i] if vbasis_batch is not None and i < len(vbasis_batch) else None
             cb_i = cbasis_batch[i] if cbasis_batch is not None and i < len(cbasis_batch) else None
-            tasks.append((i, short_delta_r_batch[i], vb_i, cb_i, x.copy()))
+            tasks.append((i, short_delta_r_batch[i], vb_i, cb_i, x.copy(), nontrivial_rc_only))
 
         results_from_pool = self._pool.map(solve_scenario_task_glob_worker, tasks)
 
@@ -300,7 +308,7 @@ class ParallelSecondStageWorker:
         obj_values_all = np.empty(num_scenarios, dtype=float)
         y_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
         pi_solutions_all = np.empty((num_scenarios, self._num_stage2_constrs), dtype=float)
-        rc_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
+        rc_solutions_all = np.empty((num_scenarios, rc_length), dtype=float)
 
         # Initialize basis arrays with the placeholder value
         vbasis_all = np.full((num_scenarios, self._num_y_vars),
@@ -331,14 +339,10 @@ class ParallelSecondStageWorker:
         """Helper to close and join the current pool."""
         if self._pool is not None:
             # print(f"Main process: Closing and joining worker pool...") # Debug
-            try:
-                self._pool.close()  # Prevents new tasks from being submitted
-                self._pool.join()   # Waits for worker processes to complete current tasks and exit
-            except Exception as e:
-                print(f"Error closing pool: {e}") # Should log this appropriately
-            finally:
-                self._pool = None
-                # print(f"Main process: Worker pool resources released.") # Debug
+            self._pool.close()  # Prevents new tasks from being submitted
+            self._pool.join()   # Waits for worker processes to complete current tasks and exit
+            self._pool = None
+            # print(f"Main process: Worker pool resources released.") # Debug
 
 
     def close(self):
