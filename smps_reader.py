@@ -579,24 +579,24 @@ class SMPSReader:
         print("-" * 30)
 
 
-# Example Usage:
-if __name__ == '__main__':
+# # Example Usage:
+# if __name__ == '__main__':
 
-    logging.basicConfig(level=logging.WARNING,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#     logging.basicConfig(level=logging.WARNING,
+#             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    file_dir = os.path.join("smps_data", "ssn")
+#     file_dir = os.path.join("smps_data", "ssn")
 
-    core_filename = "ssn.mps"
-    time_filename = "ssn.tim"
-    sto_filename = "ssn.sto"
-    core_filepath = os.path.join(file_dir, core_filename)
-    time_filepath = os.path.join(file_dir, time_filename)
-    sto_filepath = os.path.join(file_dir, sto_filename)
+#     core_filename = "ssn.mps"
+#     time_filename = "ssn.tim"
+#     sto_filename = "ssn.sto"
+#     core_filepath = os.path.join(file_dir, core_filename)
+#     time_filepath = os.path.join(file_dir, time_filename)
+#     sto_filepath = os.path.join(file_dir, sto_filename)
 
-    # --- Instantiate and Load ---
-    reader = SMPSReader(core_filepath, time_filepath, sto_filepath)
-    reader.load_and_extract()
+#     # --- Instantiate and Load ---
+#     reader = SMPSReader(core_filepath, time_filepath, sto_filepath)
+#     reader.load_and_extract()
 
-    # --- Print Summary (uses logger) ---
-    reader.print_summary()
+#     # --- Print Summary (uses logger) ---
+#     reader.print_summary()
