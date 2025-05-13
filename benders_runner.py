@@ -33,9 +33,9 @@ if __name__ == "__main__":
     smps_sto_file = smps_base_path / "ssn.sto"
 
     # Placeholders for ArgmaxOperation - set these to appropriate values
-    MAX_PI_PLACEHOLDER = 100000  # Maximum number of dual solutions to store
-    MAX_OMEGA_PLACEHOLDER = 1000000  # Maximum number of scenarios to store in ArgmaxOperation
-    SCENARIO_BATCH_SIZE_PLACEHOLDER = 1000 # Scenario batch size for ArgmaxOperation
+    MAX_PI = 100000  # Maximum number of dual solutions to store
+    MAX_OMEGA = 1000000  # Maximum number of scenarios to store in ArgmaxOperation
+    SCENARIO_BATCH_SIZE = 100000 # Scenario batch size for ArgmaxOperation
 
     # Placeholder for sample pool generation - set to desired number of samples
     NUM_SAMPLES_FOR_POOL = 1000000
@@ -54,9 +54,9 @@ if __name__ == "__main__":
     # 2. Use reader to create ArgmaxOperation
     argmax_op = ArgmaxOperation.from_smps_reader(
         reader=reader,
-        MAX_PI=MAX_PI_PLACEHOLDER,
-        MAX_OMEGA=MAX_OMEGA_PLACEHOLDER,
-        scenario_batch_size=SCENARIO_BATCH_SIZE_PLACEHOLDER
+        MAX_PI=MAX_PI,
+        MAX_OMEGA=MAX_OMEGA,
+        scenario_batch_size=SCENARIO_BATCH_SIZE
     )
 
     # 3. Use reader to create a BendersMasterProblem and a ParallelSecondStageWorker
@@ -178,7 +178,13 @@ if __name__ == "__main__":
 
         # 4. Add newly found duals to ArgmaxOperation
         initial_pi_count_in_argmax = argmax_op.num_pi
-        for s in range(NUM_SAMPLES_FOR_POOL): # Assuming argmax_op.num_scenarios reflects the scenarios processed
+        # Create an array of indices from 0 to NUM_SAMPLES_FOR_POOL - 1
+        # Randomly choose 1000 indices without replacement
+        all_indices = np.arange(NUM_SAMPLES_FOR_POOL)
+        chosen_indices = np.random.choice(all_indices, size=1000, replace=False)
+
+        # Loop through the chosen indices and add the corresponding samples
+        for s in chosen_indices:
             pi = pi_all[s, :]
             rc = rc_all[s, :]
             vbasis = vbasis_out[s, :]
@@ -201,14 +207,15 @@ if __name__ == "__main__":
         # 6. add cut if necessary
         current_cut_height = alpha + beta @ x
         current_master_height = master_problem.calculate_epigraph_value(x)
+        argmax_cut_height = alpha_pre + beta_pre @ x
 
-        print(f", CutHeight = {current_cut_height:.4f}, MasterEpiHeight = {current_master_height:.4f}", end="")
+        print(f", CutHeight = {current_cut_height:.4f}, MasterEpiHeight = {current_master_height:.4f}, ArgmaxCutHeight = {argmax_cut_height:.4f}", end="")
 
         if current_cut_height > current_master_height + TOL:
             # add cut
             master_problem.add_optimality_cut(beta, alpha)
             rho *= 1.01
-            print(f" -> Cut Added. gap = {current_master_height - current_cut_height:.4e}, rho = {rho:.4e}", end="")
+            print(f" -> Cut Added because gap = {current_master_height - current_cut_height:.4e}, rho = {rho:.4e}", end="")
         else:
             # No cut added
             print(f" -> No Cut Added.", end="")
