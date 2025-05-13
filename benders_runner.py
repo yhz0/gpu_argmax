@@ -19,6 +19,8 @@ if __name__ == "__main__":
     test_data_path = Path(".")
     # Assuming 'smps_data/cep' is a subdirectory in test_data_path
 
+    INSTANCE_NAME = "ssn"
+
     # CEP
     # h5_file_path = test_data_path / "cep_100scen_results.h5"
     # smps_base_path = test_data_path / "smps_data/cep"
@@ -54,7 +56,7 @@ if __name__ == "__main__":
     )
     reader.load_and_extract()
 
-    OUTPUT_HDF5_FILE = f"result_{reader.instance_name}.h5"
+    OUTPUT_HDF5_FILE = f"result_{INSTANCE_NAME}.h5"
     # save metadata
     with h5py.File(OUTPUT_HDF5_FILE, 'a') as hf:
         hf.create_group('/metadata')
