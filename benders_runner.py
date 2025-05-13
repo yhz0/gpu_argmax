@@ -34,13 +34,13 @@ if __name__ == "__main__":
 
     # Placeholders for ArgmaxOperation - set these to appropriate values
     MAX_PI_PLACEHOLDER = 100000  # Maximum number of dual solutions to store
-    MAX_OMEGA_PLACEHOLDER = 100000  # Maximum number of scenarios to store in ArgmaxOperation
+    MAX_OMEGA_PLACEHOLDER = 1000000  # Maximum number of scenarios to store in ArgmaxOperation
     SCENARIO_BATCH_SIZE_PLACEHOLDER = 1000 # Scenario batch size for ArgmaxOperation
 
     # Placeholder for sample pool generation - set to desired number of samples
-    NUM_SAMPLES_FOR_POOL = 100000
+    NUM_SAMPLES_FOR_POOL = 1000000
 
-    ETA_LOWER_BOUND = 7.0
+    ETA_LOWER_BOUND = 0.0
 
     # 1. Load the SMPSReader and call load_and_extract.
     print(f"\n1. Initializing SMPSReader...")
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     TOL = 1e-3
     optimal = False
     iteration_count = 0 # Initialize iteration counter
-
+    rho = 0.01
 
     print("\n--- Starting Benders Decomposition Loop ---")
 
@@ -144,13 +144,14 @@ if __name__ == "__main__":
         iteration_count += 1
 
         # 1. Solve Master Problem
+        master_problem.set_regularization_strength(rho)
         master_problem.set_regularization_center(x)
         x_next, master_obj, code = master_problem.solve() # Renamed obj to master_obj for clarity
 
         print(f"master: dist_moved = {scipy.linalg.norm(x_next - x)}")
 
         x = x_next.copy()
-
+        
         if code != 2:
             print(f"  Iter {iteration_count}: Error solving master problem. Gurobi status code: {code}")
             break
@@ -177,49 +178,37 @@ if __name__ == "__main__":
 
         # 4. Add newly found duals to ArgmaxOperation
         initial_pi_count_in_argmax = argmax_op.num_pi
-        for s in range(argmax_op.num_scenarios): # Assuming argmax_op.num_scenarios reflects the scenarios processed
+        for s in range(NUM_SAMPLES_FOR_POOL): # Assuming argmax_op.num_scenarios reflects the scenarios processed
             pi = pi_all[s, :]
             rc = rc_all[s, :]
             vbasis = vbasis_out[s, :]
             cbasis = cbasis_out[s, :]
             argmax_op.add_pi(pi, rc, vbasis, cbasis)
-        
+
         # Log current number of duals in ArgmaxOperation
         print(f", Total Duals in ArgmaxOp = {argmax_op.num_pi}", end="")
 
+        # 5. Calculate the new cut
+        pattern = reader.stochastic_rows_relative_indices
+        mean_pi = np.mean(pi_all, axis=0)
+        alpha_fixed_part = mean_pi @ reader.r_bar
+        short_pi = pi_all[:, pattern]
+        variable_part = np.sum(short_pi * short_delta_r, axis=1)
+        alpha_variable_part = np.mean(variable_part, axis=0)
+        alpha = alpha_fixed_part + alpha_variable_part
+        beta = - mean_pi @ reader.C
 
-        # 5. Run argmax again with all (old + new) duals to determine the strongest cut
-        alpha, beta, _ = argmax_op.calculate_cut(x)
-        
-        # 6. Check for optimality and add cut if necessary
-        # Ensure alpha_pre and beta_pre are valid before this calculation
-        # (User guaranteed they exist, so direct usage)
-        current_cut_value = alpha + beta @ x
-        previous_cut_value = alpha_pre + beta_pre @ x # This is E[Q(x, omega_k)] based on pi_k from warmstart
+        # 6. add cut if necessary
+        current_cut_height = alpha + beta @ x
+        current_master_height = master_problem.calculate_epigraph_value(x)
 
-        # This gives a sense of how well the argmax heuristic is
-        argmax_gap = current_cut_value - previous_cut_value
-        
-        # 7. Optimality test
-        master_eta_value = master_obj - reader.c @ x
-        gap = current_cut_value - master_obj # This is a common way to check Benders gap. Master obj is eta.
+        print(f", CutHeight = {current_cut_height:.4f}, MasterEpiHeight = {current_master_height:.4f}", end="")
 
-        print(f"cut_value = {current_cut_value:.4e}, master_eta = {master_eta_value:.4e}, gap = {gap:.4e}", end="")
-
-        optimal = gap < TOL
-        if optimal:
-            print(" -> Optimal")
-            break
-        else:
+        if current_cut_height > current_master_height + TOL:
+            # add cut
             master_problem.add_optimality_cut(beta, alpha)
-            print(" -> Cut Added.")
-
-
-    if optimal:
-        print(f"\n--- Benders Decomposition Converged after {iteration_count} iterations ---")
-        print(f"Final Master Problem Objective (c'x + eta): {master_obj:.6f}")
-        # You might want to print the final x values as well if they are of interest
-        # print(f"Final x solution: {x}")
-    else:
-        print(f"\n--- Benders Decomposition Stopped after {iteration_count} iterations (not converged or error) ---")
-
+            rho *= 1.01
+            print(f" -> Cut Added. gap = {current_master_height - current_cut_height:.4e}, rho = {rho:.4e}", end="")
+        else:
+            # No cut added
+            print(f" -> No Cut Added.", end="")

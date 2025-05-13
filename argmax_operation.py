@@ -241,10 +241,16 @@ class ArgmaxOperation:
 
             # --- Deduplication based on the (pi, rc) pair ---
             try:
-                # Concatenate pi and rc vectors for hashing
+                # 1. Round new_pi and new_rc to float16 precision
+                # Convert to float16 (this performs rounding to the nearest float16 value)
+                pi_reduced_precision = new_pi.astype(np.float16)
+                rc_reduced_precision = new_rc.astype(np.float16)
+
+                # 2. Concatenate the precision-reduced pi and rc vectors for hashing
                 # Ensure they are contiguous for consistent hashing
-                combined_pi_rc = np.concatenate((np.ascontiguousarray(new_pi),
-                                                 np.ascontiguousarray(new_rc)))
+                combined_pi_rc = np.concatenate((np.ascontiguousarray(pi_reduced_precision),
+                                                np.ascontiguousarray(rc_reduced_precision)))
+    
                 current_hash = hashlib.sha256(combined_pi_rc.tobytes()).hexdigest()
                 if current_hash in self.pi_rc_hashes:
                     # print("Debug: Duplicate (pi, rc) pair detected, not adding.")

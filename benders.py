@@ -378,6 +378,44 @@ class BendersMasterProblem(AbstractMasterProblem):
         """
         return list(self.stored_cuts.keys())
 
+
+    def calculate_epigraph_value(self, x_candidate: np.ndarray) -> float:
+        """
+        Calculates the implied epigraph value (eta) for a given candidate solution x_candidate.
+
+        The value is determined by:
+        eta = max(self.eta_lower_bound, max_k(alpha_k + beta_k^T * x_candidate))
+        This represents the minimum eta value that satisfies all current optimality cuts
+        and the explicit lower bound on eta, for the given x_candidate.
+
+        Args:
+            x_candidate (np.ndarray): A candidate solution vector for 'x' variables.
+                                      Must have shape (self.num_x,).
+
+        Returns:
+            float: The calculated epigraph value. Can be -np.inf if eta is
+                   effectively unbounded below by current constraints.
+
+        Raises:
+            ValueError: If x_candidate has an incorrect shape.
+        """
+        if not isinstance(x_candidate, np.ndarray) or x_candidate.shape != (self.num_x,):
+            raise ValueError(
+                f"x_candidate must be a numpy array of shape ({self.num_x},), "
+                f"received shape {x_candidate.shape if isinstance(x_candidate, np.ndarray) else type(x_candidate)}"
+            )
+
+        # Initialize with eta's own lower bound.
+        current_max_rhs = self.eta_lower_bound
+
+        # Iterate through all stored cuts to find the most restrictive one for x_candidate
+        for cut_data in self.stored_cuts.values():
+            # Calculate RHS of the cut: alpha_k + beta_k^T * x_candidate
+            cut_rhs_at_x_candidate = cut_data['alpha_k'] + (cut_data['beta_k'] @ x_candidate)
+            current_max_rhs = max(current_max_rhs, cut_rhs_at_x_candidate)
+
+        return current_max_rhs
+
     def close(self):
         """
         Disposes of the Gurobi model and environment, and performs cleanup
