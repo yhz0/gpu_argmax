@@ -59,10 +59,13 @@ if __name__ == "__main__":
     OUTPUT_HDF5_FILE = f"result_{INSTANCE_NAME}.h5"
     # save metadata
     with h5py.File(OUTPUT_HDF5_FILE, 'a') as hf:
+        if "/metadata" in hf:
+            del hf['/metadata']
+        
         hf.create_group('/metadata')
-        hf['/metadata'].attrs['instance_name'] = reader.instance_name
-        hf['/metadata'].attrs['num_scenarios'] = reader.NUM_SAMPLES_FOR_POOL
-        hf['/metadata'].attrs['eta_lower_bound'] = reader.ETA_LOWER_BOUND
+        hf['/metadata'].attrs['instance_name'] = INSTANCE_NAME
+        hf['/metadata'].attrs['num_scenarios'] = NUM_SAMPLES_FOR_POOL
+        hf['/metadata'].attrs['eta_lower_bound'] = ETA_LOWER_BOUND
 
 
     # 2. Use reader to create ArgmaxOperation
@@ -206,7 +209,7 @@ if __name__ == "__main__":
             break
         
         # Log master objective
-        print(f"Iter {iteration_count}: Master Obj = {master_obj:.4f}", end="")
+        print(f"Iter {iteration_count}: Master Obj = {master_obj:.4f}")
 
         # 2. Warmstart: Calculate initial cut based on existing duals
         time_start = time.time()
