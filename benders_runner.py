@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import time
 import numpy as np
 import scipy
 import h5py
@@ -26,21 +27,23 @@ if __name__ == "__main__":
     # smps_sto_file = smps_base_path / "cep.sto"
 
     # SSN
-    h5_file_path = test_data_path / "ssn_1000scen_results.h5"
+    h5_file_path = test_data_path / "ssn_5000scen_results.h5"
     smps_base_path = test_data_path / "smps_data/ssn"
     smps_core_file = smps_base_path / "ssn.mps"
     smps_time_file = smps_base_path / "ssn.tim"
     smps_sto_file = smps_base_path / "ssn.sto"
 
     # Placeholders for ArgmaxOperation - set these to appropriate values
-    MAX_PI = 100000  # Maximum number of dual solutions to store
+    MAX_PI = 1000000  # Maximum number of dual solutions to store
     MAX_OMEGA = 1000000  # Maximum number of scenarios to store in ArgmaxOperation
-    SCENARIO_BATCH_SIZE = 100000 # Scenario batch size for ArgmaxOperation
+    SCENARIO_BATCH_SIZE = 10000 # Scenario batch size for ArgmaxOperation
 
     # Placeholder for sample pool generation - set to desired number of samples
     NUM_SAMPLES_FOR_POOL = 1000000
 
     ETA_LOWER_BOUND = 0.0
+
+    
 
     # 1. Load the SMPSReader and call load_and_extract.
     print(f"\n1. Initializing SMPSReader...")
@@ -51,7 +54,17 @@ if __name__ == "__main__":
     )
     reader.load_and_extract()
 
+    OUTPUT_HDF5_FILE = f"result_{reader.instance_name}.h5"
+    # save metadata
+    with h5py.File(OUTPUT_HDF5_FILE, 'a') as hf:
+        hf.create_group('/metadata')
+        hf['/metadata'].attrs['instance_name'] = reader.instance_name
+        hf['/metadata'].attrs['num_scenarios'] = reader.NUM_SAMPLES_FOR_POOL
+        hf['/metadata'].attrs['eta_lower_bound'] = reader.ETA_LOWER_BOUND
+
+
     # 2. Use reader to create ArgmaxOperation
+    print(f"\n2. Creating ArgmaxOperation...")
     argmax_op = ArgmaxOperation.from_smps_reader(
         reader=reader,
         MAX_PI=MAX_PI,
@@ -130,8 +143,42 @@ if __name__ == "__main__":
             print("   Error: One or more required datasets not found in HDF5 file.")
             print("   Missing: /solution/dual/pi_s, /basis/vbasis_y_all, or /basis/cbasis_y_all")
 
+    # 6. Set up log
+    try:
+        hf_log_file = h5py.File(OUTPUT_HDF5_FILE, 'a') # Open in append mode
 
-    # 6. Initialization
+        # Delete the /iteration_log group if it exists, to start fresh for this run
+        if "iteration_log" in hf_log_file:
+            del hf_log_file["iteration_log"]
+            print(f"Deleted existing '/iteration_log' group from {OUTPUT_HDF5_FILE}.")
+
+        iter_log_group = hf_log_file.create_group("iteration_log")
+        print(f"Created new '/iteration_log' group in {OUTPUT_HDF5_FILE}.")
+
+        # Initialize resizable datasets for logging
+        chunk_1D = (1024,) # For scalar history datasets
+        
+        iter_log_group.create_dataset("iteration_counts", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=chunk_1D)
+        iter_log_group.create_dataset("master_obj_history", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=chunk_1D)
+        iter_log_group.create_dataset("argmax_cut_height_history", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=chunk_1D)
+        iter_log_group.create_dataset("calculated_cut_height_history", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=chunk_1D)
+        iter_log_group.create_dataset("master_epigraph_height_history", shape=(0,), maxshape=(None,), dtype=np.float64, chunks=chunk_1D)
+        
+        x_dim = len(reader.stage1_var_names)
+        if x_dim > 0:
+            chunk_2D_x = (128, x_dim) 
+            iter_log_group.create_dataset("x_vector_history", shape=(0, x_dim), maxshape=(None, x_dim), dtype=x_init.dtype, chunks=chunk_2D_x)
+        
+        # Keep track of how many rows have been logged
+        num_logged_iterations_hdf5 = 0
+
+    except Exception as e_setup:
+        print(f"FATAL: Could not set up HDF5 logging: {e_setup}")
+        if 'hf_log_file' in locals() and hf_log_file:
+            hf_log_file.close()
+        raise
+
+    # 7. Initialization
     x = x_init.copy()
     TOL = 1e-3
     optimal = False
@@ -160,8 +207,13 @@ if __name__ == "__main__":
         print(f"Iter {iteration_count}: Master Obj = {master_obj:.4f}", end="")
 
         # 2. Warmstart: Calculate initial cut based on existing duals
+        time_start = time.time()
+        print("Starting ArgmaxOperation ...", end="")
         alpha_pre, beta_pre, best_k_index = argmax_op.calculate_cut(x)
-        
+        argmax_cut_height = alpha_pre + beta_pre @ x
+        time_end = time.time()
+        print(f"ArgmaxCutHeight = {argmax_cut_height:.4f}, ArgmaxTime = {time_end - time_start:.4f}s")
+
         # Log unique number of best_k_index from the first argmax_op.calculate_cut
         if best_k_index is not None:
             num_unique_best_k = len(np.unique(best_k_index))
@@ -174,15 +226,18 @@ if __name__ == "__main__":
         vbasis_batch, cbasis_batch = argmax_op.get_basis(best_k_index)
         
         # 3. Subproblem Solver
+        print("Solving Subproblems ...", end="")
+        time_start = time.time()
         obj_all, y_all, pi_all, rc_all, vbasis_out, cbasis_out = parallel_worker.solve_batch(x, short_delta_r, vbasis_batch, cbasis_batch)
+        time_end = time.time()
+        print(f"SubproblemTime = {time_end - time_start:.4f}s")
 
         # 4. Add newly found duals to ArgmaxOperation
         initial_pi_count_in_argmax = argmax_op.num_pi
         # Create an array of indices from 0 to NUM_SAMPLES_FOR_POOL - 1
-        # Randomly choose 1000 indices without replacement
+        # Randomly choose 10000 indices without replacement
         all_indices = np.arange(NUM_SAMPLES_FOR_POOL)
-        chosen_indices = np.random.choice(all_indices, size=1000, replace=False)
-
+        chosen_indices = np.random.choice(all_indices, size=10000, replace=False)
         # Loop through the chosen indices and add the corresponding samples
         for s in chosen_indices:
             pi = pi_all[s, :]
@@ -195,6 +250,9 @@ if __name__ == "__main__":
         print(f", Total Duals in ArgmaxOp = {argmax_op.num_pi}", end="")
 
         # 5. Calculate the new cut
+        print("Calculating new cut on CPU...", end="")
+        time_start = time.time()
+
         pattern = reader.stochastic_rows_relative_indices
         mean_pi = np.mean(pi_all, axis=0)
         alpha_fixed_part = mean_pi @ reader.r_bar
@@ -207,9 +265,10 @@ if __name__ == "__main__":
         # 6. add cut if necessary
         current_cut_height = alpha + beta @ x
         current_master_height = master_problem.calculate_epigraph_value(x)
-        argmax_cut_height = alpha_pre + beta_pre @ x
 
-        print(f", CutHeight = {current_cut_height:.4f}, MasterEpiHeight = {current_master_height:.4f}, ArgmaxCutHeight = {argmax_cut_height:.4f}", end="")
+        print(f", CutHeight = {current_cut_height:.4f}, MasterEpiHeight = {current_master_height:.4f}", end="")
+        time_end = time.time()
+        print(f"CutTime = {time_end - time_start:.4f}s")
 
         if current_cut_height > current_master_height + TOL:
             # add cut
@@ -219,3 +278,39 @@ if __name__ == "__main__":
         else:
             # No cut added
             print(f" -> No Cut Added.", end="")
+        
+        # 7. Log iteration data
+        try:
+            iter_log_master_obj = master_obj
+            iter_log_argmax_cut_height = argmax_cut_height
+            iter_log_calculated_cut_height = current_cut_height
+            iter_log_master_epigraph_height = current_master_height
+            
+            current_idx_hdf5 = num_logged_iterations_hdf5
+            # Resize datasets
+            iter_log_group["iteration_counts"].resize((current_idx_hdf5 + 1,))
+            iter_log_group["master_obj_history"].resize((current_idx_hdf5 + 1,))
+            iter_log_group["argmax_cut_height_history"].resize((current_idx_hdf5 + 1,))
+            iter_log_group["calculated_cut_height_history"].resize((current_idx_hdf5 + 1,))
+            iter_log_group["master_epigraph_height_history"].resize((current_idx_hdf5 + 1,))
+            
+            if x_dim > 0:
+                iter_log_group["x_vector_history"].resize((current_idx_hdf5 + 1, x_dim))
+
+            # Write data to the new row
+            iter_log_group["iteration_counts"][current_idx_hdf5] = iteration_count
+            iter_log_group["master_obj_history"][current_idx_hdf5] = iter_log_master_obj
+            iter_log_group["argmax_cut_height_history"][current_idx_hdf5] = iter_log_argmax_cut_height
+            iter_log_group["calculated_cut_height_history"][current_idx_hdf5] = iter_log_calculated_cut_height
+            iter_log_group["master_epigraph_height_history"][current_idx_hdf5] = iter_log_master_epigraph_height
+            
+            if x_dim > 0:
+                iter_log_group["x_vector_history"][current_idx_hdf5, :] = x # Log the current x
+            
+            num_logged_iterations_hdf5 += 1
+            hf_log_file.flush() # Ensure data is written to disk after each iteration
+
+        except Exception as e_log_iter:
+            print(f"    Logging Error during iteration {iteration_count} append to HDF5: {e_log_iter}")
+            # Continue to next iteration if logging fails for one iteration
+
