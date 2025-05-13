@@ -140,7 +140,7 @@ if __name__ == "__main__":
 
     print("\n--- Starting Benders Decomposition Loop ---")
 
-    while not optimal:
+    for t in range(100):
         iteration_count += 1
 
         # 1. Solve Master Problem

@@ -461,14 +461,14 @@ class ArgmaxOperation:
             best_k_index_cpu = all_best_k_indices.cpu().numpy()
 
             # print(f"[{time.strftime('%H:%M:%S')}] Cut calculation finished.")
-            # if self.device.type == 'cuda':
-            #     try:
-            #         allocated_mem_gb = torch.cuda.memory_allocated(self.device) / 1024**3
-            #         reserved_mem_gb = torch.cuda.memory_reserved(self.device) / 1024**3
+            if self.device.type == 'cuda':
+                try:
+                    allocated_mem_gb = torch.cuda.memory_allocated(self.device) / 1024**3
+                    reserved_mem_gb = torch.cuda.memory_reserved(self.device) / 1024**3
             #         print(f"    Device VRAM allocated: {allocated_mem_gb:.2f} GB")
-            #         print(f"    Device VRAM reserved:  {reserved_mem_gb:.2f} GB")
-            #     except Exception as e:
-            #         print(f"    Could not get CUDA memory info: {e}")
+                    print(f"    Device VRAM reserved:  {reserved_mem_gb:.2f} GB")
+                except Exception as e:
+                    print(f"    Could not get CUDA memory info: {e}")
 
             return alpha, beta, best_k_index_cpu
 
