@@ -3,11 +3,13 @@ from pathlib import Path
 import numpy as np
 import scipy
 import h5py
+import scipy.linalg
 
 from smps_reader import SMPSReader
 from argmax_operation import ArgmaxOperation
-from master import AbstractMasterProblem
 from benders import BendersMasterProblem
+from regularized_benders import RegularizedBendersMasterProblem
+
 from second_stage_worker import SecondStageWorker
 from parallel_second_stage_worker import ParallelSecondStageWorker
 if __name__ == "__main__":
@@ -59,7 +61,14 @@ if __name__ == "__main__":
 
     # 3. Use reader to create a BendersMasterProblem and a ParallelSecondStageWorker
     print(f"\n3. Creating BendersMasterProblem and ParallelSecondStageWorker...")
-    master_problem = BendersMasterProblem.from_smps_reader(reader)
+
+    # regularized
+    master_problem:RegularizedBendersMasterProblem = RegularizedBendersMasterProblem.from_smps_reader(reader)
+    master_problem.set_regularization_strength(0.1)
+
+    # non regularized
+    # master_problem = BendersMasterProblem.from_smps_reader(reader)
+
     master_problem.create_benders_problem(model_name="InitialBendersMaster")
     master_problem.set_eta_lower_bound(ETA_LOWER_BOUND)
     print(f"   ETA_LOWER_BOUND = {ETA_LOWER_BOUND}.")
@@ -93,6 +102,7 @@ if __name__ == "__main__":
             pi_s_all = hf['/solution/dual/pi_s'][:]
             vbasis_y_all = hf['/basis/vbasis_y_all'][:]
             cbasis_y_all = hf['/basis/cbasis_y_all'][:]
+            x_init = hf['/solution/primal/x'][:]
 
             added_pi_count = 0
             num_scenarios_in_h5 = pi_s_all.shape[0]
@@ -121,10 +131,12 @@ if __name__ == "__main__":
             print("   Missing: /solution/dual/pi_s, /basis/vbasis_y_all, or /basis/cbasis_y_all")
 
 
-    x = None
+    # 6. Initialization
+    x = x_init.copy()
     TOL = 1e-3
     optimal = False
     iteration_count = 0 # Initialize iteration counter
+
 
     print("\n--- Starting Benders Decomposition Loop ---")
 
@@ -132,7 +144,12 @@ if __name__ == "__main__":
         iteration_count += 1
 
         # 1. Solve Master Problem
-        x, master_obj, code = master_problem.solve() # Renamed obj to master_obj for clarity
+        master_problem.set_regularization_center(x)
+        x_next, master_obj, code = master_problem.solve() # Renamed obj to master_obj for clarity
+
+        print(f"master: dist_moved = {scipy.linalg.norm(x_next - x)}")
+
+        x = x_next.copy()
 
         if code != 2:
             print(f"  Iter {iteration_count}: Error solving master problem. Gurobi status code: {code}")
@@ -187,7 +204,7 @@ if __name__ == "__main__":
         master_eta_value = master_obj - reader.c @ x
         gap = current_cut_value - master_obj # This is a common way to check Benders gap. Master obj is eta.
 
-        print(f"cut_value = {current_cut_value:.4e}, master_eta = {master_eta_value:.4e}, gap = {gap:.4e}, argmax_gap = {argmax_gap:.4e}", end="")
+        print(f"cut_value = {current_cut_value:.4e}, master_eta = {master_eta_value:.4e}, gap = {gap:.4e}", end="")
 
         optimal = gap < TOL
         if optimal:
