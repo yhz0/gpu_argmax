@@ -217,15 +217,15 @@ if __name__ == "__main__":
         alpha_pre, beta_pre, best_k_index = argmax_op.calculate_cut(x)
         argmax_cut_height = alpha_pre + beta_pre @ x
         time_end = time.time()
-        print(f"ArgmaxCutHeight = {argmax_cut_height:.4f}, ArgmaxTime = {time_end - time_start:.4f}s")
+        print(f"ArgmaxCutHeight = {argmax_cut_height:.4f}, ArgmaxTime = {time_end - time_start:.4f}s", end="")
 
         # Log unique number of best_k_index from the first argmax_op.calculate_cut
         if best_k_index is not None:
             num_unique_best_k = len(np.unique(best_k_index))
-            print(f", Unique Warmstart Duals Used = {num_unique_best_k}", end="")
+            print(f", Unique Warmstart Duals Used = {num_unique_best_k}")
         else:
             # This case should ideally not happen if best_k_index is guaranteed to exist
-            print(", Warmstart best_k_index is None", end="")
+            print(", Warmstart best_k_index is None")
 
 
         vbasis_batch, cbasis_batch = argmax_op.get_basis(best_k_index)
@@ -290,7 +290,7 @@ if __name__ == "__main__":
             iter_log_argmax_cut_height = argmax_cut_height
             iter_log_calculated_cut_height = current_cut_height
             iter_log_master_epigraph_height = current_master_height
-            
+
             current_idx_hdf5 = num_logged_iterations_hdf5
             # Resize datasets
             iter_log_group["iteration_counts"].resize((current_idx_hdf5 + 1,))
