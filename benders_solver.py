@@ -280,6 +280,7 @@ class BendersSolver:
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
         log_parts.append(f"SimplexIter: {log_metrics.get('mean_simplex_iter', 0):.2f} (0-iter: {log_metrics.get('num_zero_iter', 0)})")
         log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
+        log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")
         self.logger.info(" | ".join(log_parts))
 
     def run(self):
@@ -327,10 +328,14 @@ class BendersSolver:
             mean_simplex_iter = np.mean(simplex_iter_count)
             num_zero_iter = np.sum(simplex_iter_count == 0)
 
-            # 4. Calculate score differences and Add newly found duals to ArgmaxOperation
-            # Note that solving subproblem solvers raise the score. So the difference is the subproblem score minus the argmax score.
-            # As a heuristic, we can use the best k scores from the argmax operation to determine which duals to add.
-            score_differences = obj_all_sp - best_k_scores
+            # 4. Calculate score differences and Add newly found duals to ArgmaxOperation, if argmax procedure is run
+            if best_k_scores.size > 0:
+                # Note that solving subproblem solvers raise the score. So the difference is the subproblem score minus the argmax score.
+                # As a heuristic, we can use the best k scores from the argmax operation to determine which duals to add.
+                score_differences = obj_all_sp - best_k_scores
+            else:
+                score_differences = None
+
             coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, score_differences)
             self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}. Time: {duals_update_time:.2f}s")
 
@@ -395,30 +400,30 @@ if __name__ == "__main__":
     
     # --- Define Configuration for BendersSolver ---
 
-    solver_config = {
-        'smps_core_file': "./smps_data/ssn/ssn.mps",
-        'smps_time_file': "./smps_data/ssn/ssn.tim",
-        'smps_sto_file': "./smps_data/ssn/ssn.sto",
-        'input_h5_basis_file': './ssn_5000scen_results.h5',
-        'MAX_PI': 500000,
-        'MAX_OMEGA': 100000, 
-        'SCENARIO_BATCH_SIZE': 1000, 
-        'NUM_SAMPLES_FOR_POOL': 100000, 
-        'ETA_LOWER_BOUND': 0.0,
-        'initial_rho': 0.1,
-        'rho_increase_factor': 1.05,
-        'rho_decrease_factor': 0.95,
-        'min_rho': 1e-6,
-        'tolerance': 1e-4,
-        'max_iterations': 20, 
-        'num_duals_to_add_per_iteration': 20000,
-        'argmax_tol_cutoff': 1e-4,
-        # 'num_workers': 31, # Example: os.cpu_count() if os.cpu_count() else 1,
-        'instance_name': "ssn_example_new_log"
-    }
+    # solver_config = {
+    #     'smps_core_file': "./smps_data/ssn/ssn.mps",
+    #     'smps_time_file': "./smps_data/ssn/ssn.tim",
+    #     'smps_sto_file': "./smps_data/ssn/ssn.sto",
+    #     'input_h5_basis_file': './ssn_5000scen_results.h5',
+    #     'MAX_PI': 500000,
+    #     'MAX_OMEGA': 100000, 
+    #     'SCENARIO_BATCH_SIZE': 1000, 
+    #     'NUM_SAMPLES_FOR_POOL': 100000, 
+    #     'ETA_LOWER_BOUND': 0.0,
+    #     'initial_rho': 0.1,
+    #     'rho_increase_factor': 1.05,
+    #     'rho_decrease_factor': 0.95,
+    #     'min_rho': 1e-6,
+    #     'tolerance': 1e-4,
+    #     'max_iterations': 20, 
+    #     'num_duals_to_add_per_iteration': 20000,
+    #     'argmax_tol_cutoff': 1e-4,
+    #     # 'num_workers': 31, # Example: os.cpu_count() if os.cpu_count() else 1,
+    #     'instance_name': "ssn_example_new_log"
+    # }
 
 
-    # Example configuration for CEP
+    # # Example configuration for CEP
     # solver_config = {
     #     'smps_core_file': "./smps_data/cep/cep.mps",
     #     'smps_time_file': "./smps_data/cep/cep.tim",
@@ -439,6 +444,29 @@ if __name__ == "__main__":
     #     # 'num_workers': 4, # Example: os.cpu_count() if os.cpu_count() else 1,
     #     'instance_name': "cep_example_new_log"
     # }
+
+    # Example configuration for 20 (20term problem)
+    solver_config = {
+        'smps_core_file': "./smps_data/20/20.mps",
+        'smps_time_file': "./smps_data/20/20.tim",
+        'smps_sto_file': "./smps_data/20/20.sto",
+        'input_h5_basis_file': './20_1000scen_results.h5',
+        'MAX_PI': 200000,
+        # 'MAX_PI': 0,
+        'MAX_OMEGA': 100000, 
+        'SCENARIO_BATCH_SIZE': 1000, 
+        'NUM_SAMPLES_FOR_POOL': 100000, 
+        'ETA_LOWER_BOUND': 0.0,
+        'initial_rho': 100,
+        'rho_increase_factor': 1.05,
+        'rho_decrease_factor': 0.95,
+        'min_rho': 1e-6,
+        'tolerance': 1e-4,
+        'max_iterations': 20, 
+        'num_duals_to_add_per_iteration': 10000,
+        'argmax_tol_cutoff': 1e2,
+        'instance_name': "20_example_new_log"
+    }
 
 
     solver = BendersSolver(config=solver_config, logger_name='MyBenders')
