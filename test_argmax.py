@@ -135,7 +135,7 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
         print("\nRunning test: Argmax calculation vs Expected objective...")
         # --- Perform the core calculation using ArgmaxOperation ---
         # calculate_cut likely returns alpha, beta, and maybe an index
-        alpha, beta, _ = self.argmax_op.calculate_cut(self.x_sol) # Ignore index if unused
+        alpha, beta, _, _ = self.argmax_op.calculate_cut(self.x_sol) # Ignore index if unused
         # Calculate the estimated objective value: alpha + beta^T * x
         estimated_objective = alpha + beta @ self.x_sol
 

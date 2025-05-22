@@ -132,21 +132,21 @@ class BendersSolver:
         solve_time = time.time() - start_time
         return x_next, master_total_obj_val, status_code, solve_time
 
-    def _perform_argmax_operation(self, current_x: np.ndarray) -> Tuple[float, np.ndarray, float]:
+    def _perform_argmax_operation(self, current_x: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray, float]:
         start_time = time.time()
-        # calculate_cut can return -> tuple[float, numpy.ndarray, numpy.ndarray] | None
         cut_info = self.argmax_op.calculate_cut(current_x)
         
         if cut_info is None:
             self.logger.info("ArgmaxOperation.calculate_cut returned None (e.g., MAX_PI=0 or no duals/scenarios). Argmax cost will be NaN.")
             argmax_estim_q_x = np.nan
+            best_k_scores = np.array([], dtype=float)
             best_k_index = np.array([], dtype=int) # Ensure it's an array for get_basis
         else:
-            alpha_pre, beta_pre, best_k_index = cut_info
+            alpha_pre, beta_pre, best_k_scores, best_k_index = cut_info
             argmax_estim_q_x = alpha_pre + beta_pre @ current_x 
         
         solve_time = time.time() - start_time
-        return argmax_estim_q_x, best_k_index, solve_time
+        return argmax_estim_q_x, best_k_scores, best_k_index, solve_time
 
     def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """
@@ -174,7 +174,7 @@ class BendersSolver:
         solve_time = time.time() - start_time
         return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all, solve_time
 
-    def _update_argmax_duals(self, pi_all, rc_all, vbasis_out, cbasis_out):
+    def _update_argmax_duals(self, pi_all, rc_all, vbasis_out, cbasis_out, scores_difference=None):
         start_time = time.time()
         num_to_add = self.config.get('num_duals_to_add_per_iteration', 10000)
         num_available_duals = pi_all.shape[0]
@@ -185,11 +185,17 @@ class BendersSolver:
 
         actual_num_to_add = min(num_to_add, num_available_duals)
         
-        chosen_indices = np.random.choice(
-            np.arange(num_available_duals), 
-            size=actual_num_to_add, 
-            replace=False
-        )
+        if scores_difference is not None:
+            # Obtain the indices of the duals with the largest score differences
+            sorted_indices = np.argsort(scores_difference)[::-1]
+            chosen_indices = sorted_indices[:actual_num_to_add]
+        else:
+            # If no scores_difference is provided, randomly select duals
+            chosen_indices = np.random.choice(
+                np.arange(num_available_duals), 
+                size=actual_num_to_add, 
+                replace=False
+            )
         
         added_count = 0
         for s_idx in chosen_indices:
@@ -289,8 +295,8 @@ class BendersSolver:
             self.logger.debug(f"Iter {iter_count}: Master solved. Dist_moved: {dist_moved:.4e}")
 
             # 2. Warmstart: Calculate cut with existing duals in ArgmaxOperation
-            argmax_estim_q_x, best_k_indices_for_basis, argmax_time = self._perform_argmax_operation(self.x)
-            
+            argmax_estim_q_x, best_k_scores, best_k_indices_for_basis, argmax_time = self._perform_argmax_operation(self.x)
+    
             vbasis_batch, cbasis_batch = self.argmax_op.get_basis(best_k_indices_for_basis)
             if best_k_indices_for_basis.size > 0:
                  self.logger.debug(f"Iter {iter_count}: Argmax op used {len(np.unique(best_k_indices_for_basis))} unique duals for warmstart basis from {best_k_indices_for_basis.size} selected scenarios.")
@@ -306,8 +312,12 @@ class BendersSolver:
             mean_simplex_iter = np.mean(simplex_iter_count)
             num_zero_iter = np.sum(simplex_iter_count == 0)
 
-            # 4. Add newly found duals to ArgmaxOperation
-            duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp)
+            # 4. Calculate score differences and Add newly found duals to ArgmaxOperation
+            # Note that solving subproblem solvers raise the score. So the difference is the subproblem score minus the argmax score.
+            # As a heuristic, we can use the best k scores from the argmax operation to determine which duals to add.
+            score_differences = obj_all_sp - best_k_scores
+            self.logger.info(f"DEBUG: Score differences: {score_differences}")
+            duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, score_differences)
             self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}. Time: {duals_update_time:.2f}s")
 
             # 5. Calculate the new cut based on ALL subproblem solutions
@@ -369,12 +379,35 @@ if __name__ == "__main__":
     
     # --- Define Configuration for BendersSolver ---
 
+    solver_config = {
+        'smps_core_file': "./smps_data/ssn/ssn.mps",
+        'smps_time_file': "./smps_data/ssn/ssn.tim",
+        'smps_sto_file': "./smps_data/ssn/ssn.sto",
+        'input_h5_basis_file': './ssn_5000scen_results.h5',
+        'MAX_PI': 1000000,
+        'MAX_OMEGA': 100000, 
+        'SCENARIO_BATCH_SIZE': 1000, 
+        'NUM_SAMPLES_FOR_POOL': 100000, 
+        'ETA_LOWER_BOUND': 0.0,
+        'initial_rho': 0.1,
+        'rho_increase_factor': 1.05,
+        'rho_decrease_factor': 0.95,
+        'min_rho': 1e-6,
+        'tolerance': 1e-4,
+        'max_iterations': 20, 
+        'num_duals_to_add_per_iteration': 20000, 
+        # 'num_workers': 31, # Example: os.cpu_count() if os.cpu_count() else 1,
+        'instance_name': "ssn_example_new_log"
+    }
+
+
+    # Example configuration for CEP
     # solver_config = {
-    #     'smps_core_file': "./smps_data/ssn/ssn.mps",
-    #     'smps_time_file': "./smps_data/ssn/ssn.tim",
-    #     'smps_sto_file': "./smps_data/ssn/ssn.sto",
-    #     'input_h5_basis_file': './ssn_5000scen_results.h5',
-    #     'MAX_PI': 100000,
+    #     'smps_core_file': "./smps_data/cep/cep.mps",
+    #     'smps_time_file': "./smps_data/cep/cep.tim",
+    #     'smps_sto_file': "./smps_data/cep/cep.sto",
+    #     'input_h5_basis_file': './cep_100scen_results.h5',
+    #     'MAX_PI': 10000,
     #     'MAX_OMEGA': 100000, 
     #     'SCENARIO_BATCH_SIZE': 1000, 
     #     'NUM_SAMPLES_FOR_POOL': 100000, 
@@ -387,31 +420,8 @@ if __name__ == "__main__":
     #     'max_iterations': 20, 
     #     'num_duals_to_add_per_iteration': 1000, 
     #     # 'num_workers': 4, # Example: os.cpu_count() if os.cpu_count() else 1,
-    #     'instance_name': "ssn_example_new_log"
+    #     'instance_name': "cep_example_new_log"
     # }
-
-
-    # Example configuration for CEP
-    solver_config = {
-        'smps_core_file': "./smps_data/cep/cep.mps",
-        'smps_time_file': "./smps_data/cep/cep.tim",
-        'smps_sto_file': "./smps_data/cep/cep.sto",
-        'input_h5_basis_file': './cep_100scen_results.h5',
-        'MAX_PI': 10000,
-        'MAX_OMEGA': 100000, 
-        'SCENARIO_BATCH_SIZE': 1000, 
-        'NUM_SAMPLES_FOR_POOL': 100000, 
-        'ETA_LOWER_BOUND': 0.0,
-        'initial_rho': 0.1,
-        'rho_increase_factor': 1.05,
-        'rho_decrease_factor': 0.95,
-        'min_rho': 1e-6,
-        'tolerance': 1e-4,
-        'max_iterations': 20, 
-        'num_duals_to_add_per_iteration': 1000, 
-        # 'num_workers': 4, # Example: os.cpu_count() if os.cpu_count() else 1,
-        'instance_name': "cep_example_new_log"
-    }
 
 
     solver = BendersSolver(config=solver_config, logger_name='MyBenders')

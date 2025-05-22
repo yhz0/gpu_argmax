@@ -214,7 +214,7 @@ if __name__ == "__main__":
         # 2. Warmstart: Calculate initial cut based on existing duals
         time_start = time.time()
         print("Starting ArgmaxOperation ...", end="")
-        alpha_pre, beta_pre, best_k_index = argmax_op.calculate_cut(x)
+        alpha_pre, beta_pre, best_k_scores, best_k_index = argmax_op.calculate_cut(x)
         argmax_cut_height = alpha_pre + beta_pre @ x
         time_end = time.time()
         print(f"ArgmaxCutHeight = {argmax_cut_height:.4f}, ArgmaxTime = {time_end - time_start:.4f}s", end="")
