@@ -177,11 +177,21 @@ class BendersSolver:
     def _update_argmax_duals(self, pi_all, rc_all, vbasis_out, cbasis_out, scores_difference=None):
         start_time = time.time()
         num_to_add = self.config.get('num_duals_to_add_per_iteration', 10000)
+        ARGMAX_CUTOFF_TOLERANCE = self.config.get('argmax_tol_cutoff', 1e-4)
         num_available_duals = pi_all.shape[0]
         
+        # Calculate coverage fraction: if the scores difference is not None,
+        # and that pi has score difference smaller than the cutoff, we don't add it.
+        # We say it is covered.
+        if scores_difference is not None:
+            coverage_fraction = np.sum(scores_difference < ARGMAX_CUTOFF_TOLERANCE) / num_available_duals
+            self.logger.debug(f"Coverage fraction: {coverage_fraction:.4f} (cutoff: {ARGMAX_CUTOFF_TOLERANCE})")
+        else:
+            coverage_fraction = None
+
         if num_available_duals == 0:
             self.logger.debug("No duals available from subproblems to add to ArgmaxOperation.")
-            return 0, time.time() - start_time
+            return None, 0, time.time() - start_time
 
         actual_num_to_add = min(num_to_add, num_available_duals)
         
@@ -199,10 +209,13 @@ class BendersSolver:
         
         added_count = 0
         for s_idx in chosen_indices:
+            # Only add if the difference is larger than the cutoff
+            if scores_difference is not None and scores_difference[s_idx] < ARGMAX_CUTOFF_TOLERANCE:
+                continue
             if self.argmax_op.add_pi(pi_all[s_idx], rc_all[s_idx], vbasis_out[s_idx], cbasis_out[s_idx]):
                 added_count += 1
         update_time = time.time() - start_time
-        return added_count, update_time
+        return coverage_fraction, added_count, update_time
 
     def _calculate_and_add_cut(self, current_x, pi_all_from_subproblems):
         start_time = time.time()
@@ -264,7 +277,7 @@ class BendersSolver:
                          f"S:{log_metrics.get('subproblem_solve_time',0):.2f}s, "
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
         log_parts.append(f"SimplexIter: {log_metrics.get('mean_simplex_iter', 0):.2f} (0-iter: {log_metrics.get('num_zero_iter', 0)})")
-        
+        log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
         self.logger.info(" | ".join(log_parts))
 
     def run(self):
@@ -316,8 +329,7 @@ class BendersSolver:
             # Note that solving subproblem solvers raise the score. So the difference is the subproblem score minus the argmax score.
             # As a heuristic, we can use the best k scores from the argmax operation to determine which duals to add.
             score_differences = obj_all_sp - best_k_scores
-            self.logger.info(f"DEBUG: Score differences: {score_differences}")
-            duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, score_differences)
+            coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, score_differences)
             self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}. Time: {duals_update_time:.2f}s")
 
             # 5. Calculate the new cut based on ALL subproblem solutions
@@ -355,7 +367,9 @@ class BendersSolver:
                 "gap": gap,
                 "mean_simplex_iter": mean_simplex_iter,
                 "num_zero_iter": num_zero_iter,
-                "x_norm": scipy.linalg.norm(self.x)
+                "x_norm": scipy.linalg.norm(self.x),
+                "argmax_num_pi": self.argmax_op.num_pi,
+                "coverage_fraction": coverage_fraction,
             }
             self._log_iteration_data(iteration_metrics)
 
@@ -384,7 +398,7 @@ if __name__ == "__main__":
         'smps_time_file': "./smps_data/ssn/ssn.tim",
         'smps_sto_file': "./smps_data/ssn/ssn.sto",
         'input_h5_basis_file': './ssn_5000scen_results.h5',
-        'MAX_PI': 1000000,
+        'MAX_PI': 500000,
         'MAX_OMEGA': 100000, 
         'SCENARIO_BATCH_SIZE': 1000, 
         'NUM_SAMPLES_FOR_POOL': 100000, 
@@ -395,7 +409,8 @@ if __name__ == "__main__":
         'min_rho': 1e-6,
         'tolerance': 1e-4,
         'max_iterations': 20, 
-        'num_duals_to_add_per_iteration': 20000, 
+        'num_duals_to_add_per_iteration': 20000,
+        'argmax_tol_cutoff': 1e-4,
         # 'num_workers': 31, # Example: os.cpu_count() if os.cpu_count() else 1,
         'instance_name': "ssn_example_new_log"
     }
