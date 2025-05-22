@@ -208,6 +208,7 @@ class SecondStageWorker:
         # --- Set Gurobi parameters for this specific solve ---
         self.model.setParam(gp.GRB.Param.Threads, 1 if single_thread else 0) # 0 lets Gurobi decide
         self.model.setParam(gp.GRB.Param.Method, 1 if use_dual_simplex else -1) # 1=Dual, -1=Auto
+        # self.model.setParam(gp.GRB.Param.LPWarmStart, 2)
 
         # --- Solve the model ---
         # optimize() processes pending changes (e.g., RHS update from set_x/set_scenario)
@@ -265,9 +266,11 @@ class SecondStageWorker:
         if len(vbasis) != num_y_vars: raise ValueError(f"vbasis length mismatch")
         if len(cbasis) != num_stage2_constrs: raise ValueError(f"cbasis length mismatch")
 
+        # print(f"Setting basis: vbasis={vbasis}, cbasis={cbasis}")
+
         # Set Gurobi attributes directly
-        self.y_vars.VBasis = vbasis.astype(int, copy=False)
-        self.constraints.CBasis = cbasis.astype(int, copy=False)
+        self.y_vars.VBasis = vbasis.astype(int, copy=True)
+        self.constraints.CBasis = cbasis.astype(int, copy=True)
 
     def close(self):
         """

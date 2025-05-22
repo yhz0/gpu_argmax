@@ -148,12 +148,31 @@ class BendersSolver:
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_index, solve_time
 
-    def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        """
+        Solves a batch of subproblems in parallel using the current solution vector and optional basis information.
+
+        Args:
+            current_x (np.ndarray): The current solution vector for the master problem.
+            vbasis_batch (Optional[np.ndarray]): Optional batch of variable basis statuses for warm-starting the solver.
+            cbasis_batch (Optional[np.ndarray]): Optional batch of constraint basis statuses for warm-starting the solver.
+
+        Returns:
+            Tuple[
+                np.ndarray,  # obj_all: Objective values for all subproblems.
+                np.ndarray,  # pi_all: Dual variables for all subproblems.
+                np.ndarray,  # rc_all: Reduced costs for all subproblems.
+                np.ndarray,  # vbasis_out: Output variable basis statuses after solving.
+                np.ndarray,  # cbasis_out: Output constraint basis statuses after solving.
+                np.ndarray,  # simplex_iter_count_all: Number of simplex iterations for each subproblem.
+                float        # solve_time: Total time taken to solve all subproblems.
+            ]
+        """
         start_time = time.time()
-        obj_all, y_all, pi_all, rc_all, vbasis_out, cbasis_out = \
+        obj_all, y_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all = \
             self.parallel_worker.solve_batch(current_x, self.short_delta_r, vbasis_batch, cbasis_batch)
         solve_time = time.time() - start_time
-        return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, solve_time
+        return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all, solve_time
 
     def _update_argmax_duals(self, pi_all, rc_all, vbasis_out, cbasis_out):
         start_time = time.time()
@@ -188,7 +207,7 @@ class BendersSolver:
 
         mean_pi = np.mean(pi_all_from_subproblems, axis=0)
         
-        # Ensure reader attributes are available (they are placeholders in the example)
+        # Ensure reader attributes are available
         alpha_fixed_part = mean_pi @ self.reader.r_bar 
         pattern = self.reader.stochastic_rows_relative_indices
         short_pi_s = pi_all_from_subproblems[:, pattern]
@@ -238,6 +257,7 @@ class BendersSolver:
                          f"A:{log_metrics.get('argmax_op_time',0):.2f}s, "
                          f"S:{log_metrics.get('subproblem_solve_time',0):.2f}s, "
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
+        log_parts.append(f"SimplexIter: {log_metrics.get('mean_simplex_iter', 0):.2f} (0-iter: {log_metrics.get('num_zero_iter', 0)})")
         
         self.logger.info(" | ".join(log_parts))
 
@@ -278,8 +298,13 @@ class BendersSolver:
                  self.logger.debug(f"Iter {iter_count}: Argmax op provided no basis (best_k_indices empty).")
 
             # 3. Subproblem Solver
-            obj_all_sp, pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, subproblem_time = \
+            obj_all_sp, pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, simplex_iter_count, subproblem_time = \
                 self._solve_subproblems(self.x, vbasis_batch, cbasis_batch)
+            
+            # Log simplex iteration counts
+            # Count mean simplex iterations for all subproblems, and number subproblems that were immediately solved with a warmstart (simplex_iter_count == 0)
+            mean_simplex_iter = np.mean(simplex_iter_count)
+            num_zero_iter = np.sum(simplex_iter_count == 0)
 
             # 4. Add newly found duals to ArgmaxOperation
             duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp)
@@ -318,22 +343,12 @@ class BendersSolver:
                 "rho": self.rho,
                 "cut_added": cut_added,
                 "gap": gap,
+                "mean_simplex_iter": mean_simplex_iter,
+                "num_zero_iter": num_zero_iter,
                 "x_norm": scipy.linalg.norm(self.x)
             }
             self._log_iteration_data(iteration_metrics)
 
-            # Convergence Check
-            # The gap is cost_from_cut - cost_from_master.
-            # If cost_from_cut is a true upper bound and cost_from_master is a true lower bound,
-            # then convergence is when this gap is small.
-            # The original cut condition was subproblem_actual_q_x > current_master_epigraph_eta_at_x + TOL
-            # This means if the new estimate of Q(x) is significantly higher than what master expects (eta), add a cut.
-            # If no cut is added, it implies subproblem_actual_q_x <= current_master_epigraph_eta_at_x + TOL.
-            # And if the overall gap (cost_from_cut - cost_from_master) is small, we might converge.
-            if gap <= self.config['tolerance'] and not cut_added: 
-                self.logger.info(f"Convergence criteria met at iteration {iter_count}. Gap: {gap:.4e}")
-                break
-            
             if iter_count == max_iterations:
                 self.logger.info("Reached maximum iterations.")
 
@@ -354,13 +369,35 @@ if __name__ == "__main__":
     
     # --- Define Configuration for BendersSolver ---
 
+    # solver_config = {
+    #     'smps_core_file': "./smps_data/ssn/ssn.mps",
+    #     'smps_time_file': "./smps_data/ssn/ssn.tim",
+    #     'smps_sto_file': "./smps_data/ssn/ssn.sto",
+    #     'input_h5_basis_file': './ssn_5000scen_results.h5',
+    #     'MAX_PI': 100000,
+    #     'MAX_OMEGA': 100000, 
+    #     'SCENARIO_BATCH_SIZE': 1000, 
+    #     'NUM_SAMPLES_FOR_POOL': 100000, 
+    #     'ETA_LOWER_BOUND': 0.0,
+    #     'initial_rho': 0.1,
+    #     'rho_increase_factor': 1.05,
+    #     'rho_decrease_factor': 0.95,
+    #     'min_rho': 1e-6,
+    #     'tolerance': 1e-4,
+    #     'max_iterations': 20, 
+    #     'num_duals_to_add_per_iteration': 1000, 
+    #     # 'num_workers': 4, # Example: os.cpu_count() if os.cpu_count() else 1,
+    #     'instance_name': "ssn_example_new_log"
+    # }
 
+
+    # Example configuration for CEP
     solver_config = {
-        'smps_core_file': "./smps_data/ssn/ssn.mps",
-        'smps_time_file': "./smps_data/ssn/ssn.tim",
-        'smps_sto_file': "./smps_data/ssn/ssn.sto",
-        'input_h5_basis_file': './ssn_5000scen_results.h5',
-        'MAX_PI': 100000,
+        'smps_core_file': "./smps_data/cep/cep.mps",
+        'smps_time_file': "./smps_data/cep/cep.tim",
+        'smps_sto_file': "./smps_data/cep/cep.sto",
+        'input_h5_basis_file': './cep_100scen_results.h5',
+        'MAX_PI': 10000,
         'MAX_OMEGA': 100000, 
         'SCENARIO_BATCH_SIZE': 1000, 
         'NUM_SAMPLES_FOR_POOL': 100000, 
@@ -373,8 +410,9 @@ if __name__ == "__main__":
         'max_iterations': 20, 
         'num_duals_to_add_per_iteration': 1000, 
         # 'num_workers': 4, # Example: os.cpu_count() if os.cpu_count() else 1,
-        'instance_name': "ssn_example_new_log"
+        'instance_name': "cep_example_new_log"
     }
+
 
     solver = BendersSolver(config=solver_config, logger_name='MyBenders')
     

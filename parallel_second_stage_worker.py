@@ -51,14 +51,10 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
     _g_worker_instance.set_scenario(short_delta_r)
 
     if vbasis_in is not None and cbasis_in is not None:
-        try:
-            _g_worker_instance.set_basis(vbasis_in, cbasis_in)
-        except ValueError as e:
-            # Log or handle if a bad basis is passed; for now, just print a warning
-            print(f"Process {os.getpid()}: Warning - error setting basis for scenario {scenario_idx}: {e}")
-
+        _g_worker_instance.set_basis(vbasis_in, cbasis_in)
 
     result = _g_worker_instance.solve(nontrivial_rc_only=nontrivial_rc_only)
+    iter_count = _g_worker_instance.get_iter_count()
 
     # Get dimensions for placeholder arrays if needed
     num_y = len(_g_worker_instance.d)
@@ -75,7 +71,7 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
         if basis_data:
             vbasis_out, cbasis_out = basis_data
         # If basis_data is None (e.g., optimal but basis not available), vbasis_out/cbasis_out remain None
-        return scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out
+        return scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out, iter_count
     else:
         # Handle cases where the subproblem solve fails (e.g., infeasible)
         return (scenario_idx, np.nan,
@@ -83,7 +79,8 @@ def solve_scenario_task_glob_worker(task_details: tuple) -> tuple:
                 np.full(num_constr, np.nan, dtype=float),
                 np.full(num_rc, np.nan, dtype=float),
                 vbasis_out, # Will be None
-                cbasis_out) # Will be None
+                cbasis_out, # Will be None
+                iter_count) # -1 for failed solve
 
 
 def update_worker_x_task(new_x_value: np.ndarray) -> int: # Return PID for confirmation
@@ -319,7 +316,8 @@ class ParallelSecondStageWorker:
                     np.empty((0, self._num_stage2_constrs), dtype=float), # pi_solutions
                     np.empty((0, rc_length), dtype=float), # rc_solutions
                     np.empty((0, self._num_y_vars), dtype=np.int8), # vbasis_all
-                    np.empty((0, self._num_stage2_constrs), dtype=np.int8)) # cbasis_all
+                    np.empty((0, self._num_stage2_constrs), dtype=np.int8), # cbasis_all
+                    np.array([])) # iter_count_all
 
         self._synchronize_x_with_workers(x)
         if self._pool is None: # Should be initialized by _synchronize_x_with_workers
@@ -338,7 +336,7 @@ class ParallelSecondStageWorker:
         y_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
         pi_solutions_all = np.empty((num_scenarios, self._num_stage2_constrs), dtype=float)
         rc_solutions_all = np.empty((num_scenarios, rc_length), dtype=float)
-
+        iter_count_all = np.empty(num_scenarios, dtype=int)
         # Initialize basis arrays with the placeholder value
         vbasis_all = np.full((num_scenarios, self._num_y_vars),
                              fill_value=self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
@@ -347,12 +345,13 @@ class ParallelSecondStageWorker:
 
         for result_tuple in results_from_pool:
             # Unpack results, now including vbasis_out and cbasis_out
-            scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out = result_tuple
+            scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out, simplex_iter_count = result_tuple
 
             obj_values_all[scenario_idx] = obj_val
             y_solutions_all[scenario_idx, :] = y_sol
             pi_solutions_all[scenario_idx, :] = pi_sol
             rc_solutions_all[scenario_idx, :] = rc_sol
+            iter_count_all[scenario_idx] = simplex_iter_count
 
             if vbasis_out is not None:
                 vbasis_all[scenario_idx, :] = vbasis_out
@@ -362,7 +361,7 @@ class ParallelSecondStageWorker:
                 cbasis_all[scenario_idx, :] = cbasis_out
             # Else, it remains the placeholder value
 
-        return obj_values_all, y_solutions_all, pi_solutions_all, rc_solutions_all, vbasis_all, cbasis_all
+        return obj_values_all, y_solutions_all, pi_solutions_all, rc_solutions_all, vbasis_all, cbasis_all, iter_count_all
 
     def _close_pool_resources(self):
         """Helper to close and join the current pool."""
