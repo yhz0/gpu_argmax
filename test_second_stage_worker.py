@@ -143,6 +143,55 @@ class TestSecondStageWorkerAgainstSAA(unittest.TestCase):
             if worker is not None:
                 worker.close()
 
+    def test_basis_set_sucessful(self):
+        """
+        Tests if the basis can be set successfully in the worker.
+        """
+        worker = None
+
+        # Initialize Worker
+        worker = SecondStageWorker.from_smps_reader(self.reader)
+
+        # Set x and scenario
+        worker.set_x(self.x_sol_ref)
+        current_short_delta_r = self.short_delta_r_all[0, :]
+        worker.set_scenario(current_short_delta_r)
+
+        # Optimize the model
+        result = worker.solve()
+
+        # print number of simplex iterations
+        print(f"First solve: {worker.get_iter_count()} simplex iterations")
+
+        # Obtain the basis
+        vb, cb = worker.get_basis()
+        print(f"vbasis first solve: {vb}")
+        print(f"cbasis first solve: {cb}")
+
+        # Dispose worker and restart a new one
+        worker.close()
+        del worker
+        worker = SecondStageWorker.from_smps_reader(self.reader)
+
+        # Set the first-stage solution and scenario again
+        worker.set_x(self.x_sol_ref)
+        worker.set_scenario(current_short_delta_r)
+
+        # Set the basis
+        worker.set_basis(vb, cb)
+
+        # Optimize the model
+        result = worker.solve()
+
+        # print number of simplex iterations
+        print(f"Second solve: {worker.get_iter_count()} simplex iterations")
+
+        # assert the number of iterations is zero
+        self.assertEqual(worker.get_iter_count(), 0, "Basis not set correctly, expected 0 iterations after setting basis.")
+
+        # Cleanup
+        worker.close()
+
 if __name__ == '__main__':
     # This allows running the tests from the command line
     unittest.main()

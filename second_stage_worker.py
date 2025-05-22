@@ -78,8 +78,13 @@ class SecondStageWorker:
             self.env = gp.Env(empty=True)
             self.env.start() # Start the independent environment
 
+            # --- Set Gurobi parameters for this specific solve ---
             self.model = gp.Model(name="SecondStageSubproblem", env=self.env)
-            self.model.setParam('OutputFlag', 0) # Suppress solver console output
+            self.model.setParam(gp.GRB.Param.OutputFlag, 0) # Suppress solver console output
+            self.model.setParam(gp.GRB.Param.Threads, 1)
+            self.model.setParam(gp.GRB.Param.Method, 1) # 1=Dual, -1=Auto
+            self.model.setParam(gp.GRB.Param.LPWarmStart, 2)
+            self.model.setParam(gp.GRB.Param.Presolve, 0) # Disable presolve
 
             # --- Define Gurobi Model Structure ---
             num_y_vars = len(self.d)
@@ -90,7 +95,10 @@ class SecondStageWorker:
             # Initialize Gurobi RHS attribute; will be overwritten by set_x/set_scenario
             self.constraints = self.model.addMConstr(A=self.D, x=self.y_vars, sense=senses_char, b=np.zeros(num_stage2_constrs), name=self.stage2_constr_names)
             self.model.ModelSense = gp.GRB.MINIMIZE
-            # No model.update() needed after initial addMVar/addMConstr build
+
+            # IMPORTANT: need to update the model to ensure all attributes are set correctly
+            self.model.update()
+
         except gp.GurobiError as e:
             print(f"FATAL: Error initializing Gurobi model: {e.code} - {e}")
             if hasattr(self, 'env'): self.env.dispose() # Attempt cleanup
@@ -156,6 +164,7 @@ class SecondStageWorker:
 
         # Directly update the Gurobi model's RHS attribute state
         self.constraints.RHS = self._h_bar
+        self.model.update()
 
     def set_scenario(self, short_delta_r: np.ndarray):
         """
@@ -186,8 +195,9 @@ class SecondStageWorker:
         final_rhs = self._h_bar.copy() # Start from base RHS (r_bar - Cx)
         final_rhs[self.stochastic_rows_relative_indices] = self._h_bar_stochastic_part + short_delta_r
         self.constraints.RHS = final_rhs
+        self.model.update()
 
-    def solve(self, use_dual_simplex: bool = True, single_thread: bool = True, nontrivial_rc_only = True) -> t.Optional[t.Tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
+    def solve(self, nontrivial_rc_only = True) -> t.Optional[t.Tuple[float, np.ndarray, np.ndarray, np.ndarray]]:
         """
         Solves the second-stage subproblem.
 
@@ -195,8 +205,6 @@ class SecondStageWorker:
         model modifications (like the latest RHS value assigned).
 
         Args:
-            use_dual_simplex: If True, forces the dual simplex algorithm.
-            single_thread: If True, restricts Gurobi to a single thread.
             nontrivial_rc_only: If True, only returns reduced costs for variables
                            with finite bounds (non-trivial). Otherwise, computes
                            for all variables.
@@ -205,10 +213,6 @@ class SecondStageWorker:
             A tuple (objective_value, y_solution, dual_solution_pi, reduced_costs)
             if optimal, otherwise None.
         """
-        # --- Set Gurobi parameters for this specific solve ---
-        self.model.setParam(gp.GRB.Param.Threads, 1 if single_thread else 0) # 0 lets Gurobi decide
-        self.model.setParam(gp.GRB.Param.Method, 1 if use_dual_simplex else -1) # 1=Dual, -1=Auto
-        # self.model.setParam(gp.GRB.Param.LPWarmStart, 2)
 
         # --- Solve the model ---
         # optimize() processes pending changes (e.g., RHS update from set_x/set_scenario)
@@ -269,8 +273,12 @@ class SecondStageWorker:
         # print(f"Setting basis: vbasis={vbasis}, cbasis={cbasis}")
 
         # Set Gurobi attributes directly
-        self.y_vars.VBasis = vbasis.astype(int, copy=True)
-        self.constraints.CBasis = cbasis.astype(int, copy=True)
+        # self.y_vars.VBasis = vbasis.astype(int, copy=False)
+        # self.constraints.CBasis = cbasis.astype(int, copy=False)
+        # self.model.update() 
+
+        self.y_vars.setAttr(gp.GRB.Attr.VBasis, vbasis.tolist())
+        self.constraints.setAttr(gp.GRB.Attr.CBasis, cbasis.tolist())
 
     def close(self):
         """
