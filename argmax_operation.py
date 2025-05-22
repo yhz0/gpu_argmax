@@ -100,7 +100,7 @@ class ArgmaxOperation:
         basis_dtype_np = np.int8 # Compact storage for basis status
         self.vbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_VARS), dtype=basis_dtype_np)
         self.cbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=basis_dtype_np)
-        self.pi_rc_hashes = set() # For deduplication based on (pi, rc) pair
+        self.hashes = set() # For deduplication based on (vbasis, cbasis) pair
 
         # --- GPU (Device) Data Storage ---
         print(f"[{time.strftime('%H:%M:%S')}] Allocating memory on device {self.device}...")
@@ -241,25 +241,19 @@ class ArgmaxOperation:
                 # print(f"Warning: MAX_PI ({self.MAX_PI}) reached. Cannot add new solution.")
                 return False
 
-            # --- Deduplication based on the (pi, rc) pair ---
+            # --- Deduplication based on the (vbasis, cbasis) pair ---
             try:
-                # 1. Round new_pi and new_rc to float16 precision
-                # Convert to float16 (this performs rounding to the nearest float16 value)
-                pi_reduced_precision = new_pi.astype(np.float16)
-                rc_reduced_precision = new_rc.astype(np.float16)
+                # 1. Concatenate
+                combined_vbasis_cbasis = np.concatenate((np.ascontiguousarray(new_vbasis),
+                                                          np.ascontiguousarray(new_cbasis)))
 
-                # 2. Concatenate the precision-reduced pi and rc vectors for hashing
-                # Ensure they are contiguous for consistent hashing
-                combined_pi_rc = np.concatenate((np.ascontiguousarray(pi_reduced_precision),
-                                                np.ascontiguousarray(rc_reduced_precision)))
-    
-                current_hash = hashlib.sha256(combined_pi_rc.tobytes()).hexdigest()
-                if current_hash in self.pi_rc_hashes:
-                    # print("Debug: Duplicate (pi, rc) pair detected, not adding.")
+                current_hash = hashlib.sha256(combined_vbasis_cbasis.tobytes()).hexdigest()
+                if current_hash in self.hashes:
+                    # print("Debug: Duplicate (vbasis, cbasis) pair detected, not adding.")
                     return False
-                self.pi_rc_hashes.add(current_hash)
+                self.hashes.add(current_hash)
             except Exception as e:
-                print(f"Warning: Could not hash (pi, rc) pair for deduplication. Adding anyway. Error: {e}")
+                print(f"Warning: Could not hash (vbasis, cbasis) pair for deduplication. Adding anyway. Error: {e}")
 
             idx = self.num_pi
 
@@ -327,7 +321,7 @@ class ArgmaxOperation:
         self.num_scenarios += num_to_add
         return True
 
-    def calculate_cut(self, x: np.ndarray) -> tuple[float, np.ndarray, np.ndarray] | None:
+    def calculate_cut(self, x: np.ndarray) -> tuple[float, np.ndarray, np.ndarray, np.ndarray] | None:
         """
         Calculates Benders cut coefficients (alpha, beta) for a given x using an
         optimized approach. Selects the best dual solution (pi_k, rc_k) for each
@@ -344,6 +338,7 @@ class ArgmaxOperation:
             tuple (alpha, beta, best_k_indices) or None if no solutions/scenarios.
             - alpha (float): Constant term of the Benders cut (float64).
             - beta (np.ndarray): Coefficient vector of the cut (float64, size X_DIM).
+            - best_k_scores (np.ndarray): Score of the best pi/rc/basis for each scenario (float32, size num_scenarios).
             - best_k_indices (np.ndarray): Index of the best pi/rc/basis for each
                                            scenario (int32, size num_scenarios).
         """
@@ -386,7 +381,7 @@ class ArgmaxOperation:
             total_selected_mu_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
             total_s_sum = torch.zeros((), dtype=torch.float64, device=self.device) # scalar
             all_best_k_indices = torch.zeros(self.num_scenarios, dtype=torch.int32, device=self.device)
-
+            all_best_k_scores = torch.zeros(self.num_scenarios, dtype=torch.float32, device=self.device)
             # --- Process scenarios in batches ---
             num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
             # print(f"[{time.strftime('%H:%M:%S')}] Processing {self.num_scenarios} scenarios in {num_batches} batches of size {self.scenario_batch_size}...")
@@ -411,9 +406,11 @@ class ArgmaxOperation:
                 # scores_batch shape: (current_batch_size, num_pi)
                 scores_batch = stochastic_score_part_batch + constant_score_part_all_k 
                 # argmax along dim=1 to find best pi_k for each scenario (row)
-                best_k_index_batch = torch.argmax(scores_batch, dim=1) # Shape (current_batch_size,)
+                best_k_scores_batch, best_k_index_batch = torch.max(scores_batch, dim=1) # Shape (current_batch_size,), (current_batch_size,)
+
                 del scores_batch 
                 all_best_k_indices[start_scenario_idx:end_scenario_idx] = best_k_index_batch.to(torch.int32)
+                all_best_k_scores[start_scenario_idx:end_scenario_idx] = best_k_scores_batch
 
                 # --- Step 3 (Batch): Compute s_i = short_pi_k*^T * short_delta_r_i for the best k* ---
                 # Need to select the scores from stochastic_score_part_batch that correspond to the best_k_index_batch
@@ -461,6 +458,7 @@ class ArgmaxOperation:
             alpha = alpha_gpu.item()
             beta = beta_gpu.cpu().numpy()
             best_k_index_cpu = all_best_k_indices.cpu().numpy()
+            best_k_scores_cpu = all_best_k_scores.cpu().numpy()
 
             # print(f"[{time.strftime('%H:%M:%S')}] Cut calculation finished.")
             if self.device.type == 'cuda':
@@ -472,7 +470,7 @@ class ArgmaxOperation:
                 except Exception as e:
                     print(f"    Could not get CUDA memory info: {e}")
 
-            return alpha, beta, best_k_index_cpu
+            return alpha, beta, best_k_scores_cpu, best_k_index_cpu
 
     # --- Retrieval Methods ---
     def get_basis(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
