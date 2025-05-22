@@ -83,7 +83,7 @@ class SecondStageWorker:
             self.model.setParam(gp.GRB.Param.OutputFlag, 0) # Suppress solver console output
             self.model.setParam(gp.GRB.Param.Threads, 1)
             self.model.setParam(gp.GRB.Param.Method, 1) # 1=Dual, -1=Auto
-            self.model.setParam(gp.GRB.Param.LPWarmStart, 2)
+            # self.model.setParam(gp.GRB.Param.LPWarmStart, 1) # Force warm start without presolving
             # self.model.setParam(gp.GRB.Param.Presolve, 0) # Disable presolve
 
             # --- Define Gurobi Model Structure ---
