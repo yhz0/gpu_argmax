@@ -296,11 +296,11 @@ class ArgmaxOperation:
         Returns:
             True if scenarios were added (partially or fully), False otherwise.
         """
-        # MODIFIED VALIDATION: Check shape[1] for R_SPARSE_LEN, input is (num_scenarios, R_SPARSE_LEN)
+        # Check shape[1] for R_SPARSE_LEN, input is (num_scenarios, R_SPARSE_LEN)
         if new_short_r_delta.ndim != 2 or new_short_r_delta.shape[1] != self.R_SPARSE_LEN:
             raise ValueError(f"new_short_r_delta shape mismatch. Expected (num_new_scenarios, {self.R_SPARSE_LEN}), got {new_short_r_delta.shape}")
         
-        # MODIFIED: num_new_scenarios is now from shape[0]
+        # num_new_scenarios is now from shape[0]
         num_new_scenarios = new_short_r_delta.shape[0]
         available_slots = self.MAX_OMEGA - self.num_scenarios
         if num_new_scenarios <= 0 or available_slots <= 0:
@@ -312,7 +312,7 @@ class ArgmaxOperation:
         new_short_r_delta_to_add = new_short_r_delta # Placeholder for slicing
         if num_to_add < num_new_scenarios:
             print(f"Warning: Exceeds MAX_OMEGA. Adding only {num_to_add} of {num_new_scenarios} new scenarios.")
-            # MODIFIED: Slicing rows from the input
+            # Slicing rows from the input
             new_short_r_delta_to_add = new_short_r_delta[:num_to_add, :]
         else:
             new_short_r_delta_to_add = new_short_r_delta # Use as is if it fits

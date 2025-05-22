@@ -252,32 +252,61 @@ class ParallelSecondStageWorker:
         # Step 3: Pool exists, but x has changed. Send update_worker_x_task to all workers.
         # print(f"Main process: X has changed. Sending update_worker_x_task to all workers.") # Debug
         update_tasks_args = [x.copy() for _ in range(self.num_workers)] # One task for each worker
-        try:
-            # This pool.map call is blocking. It ensures all workers have
-            # processed set_x before this method returns.
-            results = self._pool.map(update_worker_x_task, update_tasks_args)
-            # print(f"Main process: update_worker_x_task completed by PIDs: {results}") # Debug
-            self._current_x_for_pool = x.copy() # Record that pool workers are now updated with this x
-        except Exception as e:
-            # A critical error occurred while trying to update x across workers.
-            # The pool might be in an inconsistent state.
-            # Safest action is to close the current pool and recreate it.
-            print(f"Main process: Error during x update for workers: {e}. Recreating pool for safety.") # Log this
-            self._close_pool_resources() # Close the potentially faulty pool
+        # This pool.map call is blocking. It ensures all workers have
+        # processed set_x before this method returns.
+        results = self._pool.map(update_worker_x_task, update_tasks_args)
+        # print(f"Main process: update_worker_x_task completed by PIDs: {results}") # Debug
+        self._current_x_for_pool = x.copy() # Record that pool workers are now updated with this x
 
-            # Recreate the pool (similar to Step 1)
-            ctx = multiprocessing.get_context("spawn")
-            self._pool = ctx.Pool(
-                processes=self.num_workers,
-                initializer=init_worker_process,
-                initargs=(self._worker_constructor_args, x.copy())
-            )
-            self._current_x_for_pool = x.copy()
-            # print(f"Main process: Pool recreated after x update failure.") # Debug
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
                     cbasis_batch: Optional[np.ndarray] = None, nontrivial_rc_only = True) \
-                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: # Updated return tuple
+                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Solves a batch of second-stage scenarios in parallel using a worker pool.
+        Parameters
+        ----------
+        x : np.ndarray
+            The first-stage solution vector to synchronize with workers.
+        short_delta_r_batch : np.ndarray
+            Batch of scenario-specific right-hand side modifications for the second-stage problems.
+            Shape: (num_scenarios, ...)
+        vbasis_batch : Optional[np.ndarray], optional
+            Optional batch of basis status arrays for variables, one per scenario.
+            Shape: (num_scenarios, num_y_vars)
+        cbasis_batch : Optional[np.ndarray], optional
+            Optional batch of basis status arrays for constraints, one per scenario.
+            Shape: (num_scenarios, num_stage2_constrs)
+        nontrivial_rc_only : bool, default=True
+            If True, only nontrivial reduced costs are returned; otherwise, all reduced costs are returned.
+        Returns
+        -------
+        obj_values_all : np.ndarray
+            Array of objective values for each scenario. Shape: (num_scenarios,)
+        y_solutions_all : np.ndarray
+            Array of solution vectors for second-stage variables for each scenario.
+            Shape: (num_scenarios, num_y_vars)
+        pi_solutions_all : np.ndarray
+            Array of dual variable solutions for each scenario.
+            Shape: (num_scenarios, num_stage2_constrs)
+        rc_solutions_all : np.ndarray
+            Array of reduced costs for each scenario.
+            Shape: (num_scenarios, rc_length)
+        vbasis_all : np.ndarray
+            Array of basis status for variables for each scenario.
+            Shape: (num_scenarios, num_y_vars)
+        cbasis_all : np.ndarray
+            Array of basis status for constraints for each scenario.
+            Shape: (num_scenarios, num_stage2_constrs)
+        Raises
+        ------
+        RuntimeError
+            If the worker has been closed or the worker pool is not initialized.
+        Notes
+        -----
+        This method distributes the scenario solves across a pool of worker processes.
+        """
+
         if self._closed:
             raise RuntimeError("ParallelSecondStageWorker has been closed.")
         

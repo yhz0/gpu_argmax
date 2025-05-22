@@ -229,6 +229,18 @@ class SecondStageWorker:
             # print(f"Worker solve finished with non-optimal status: {status}")
             return None # Indicate non-optimal solution
 
+    def get_iter_count(self) -> int:
+        """
+        Retrieves the number of iterations taken by the last solve.
+
+        Returns:
+            The number of iterations, or -1 if the model is not solved.
+        """
+        if self.model.SolCount > 0:
+            return int(self.model.IterCount)
+        else:
+            return -1
+
     def get_basis(self) -> t.Optional[t.Tuple[np.ndarray, np.ndarray]]:
         """
         Retrieves the current basis (VBasis, CBasis) after an optimal solve.
@@ -247,7 +259,6 @@ class SecondStageWorker:
     def set_basis(self, vbasis: np.ndarray, cbasis: np.ndarray):
         """
         Sets the VBasis and CBasis attributes for warm starting the next solve.
-        Calls model.update() to ensure the change is registered by Gurobi.
         """
         num_y_vars = len(self.d)
         num_stage2_constrs = len(self.r_bar)
@@ -257,9 +268,6 @@ class SecondStageWorker:
         # Set Gurobi attributes directly
         self.y_vars.VBasis = vbasis.astype(int, copy=False)
         self.constraints.CBasis = cbasis.astype(int, copy=False)
-
-        # Update is recommended after setting basis before the next optimize call
-        self.model.update()
 
     def close(self):
         """

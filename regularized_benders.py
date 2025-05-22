@@ -86,7 +86,7 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
             self.logger.warning(f"Regularization strength rho should be non-negative. Received: {new_rho}")
         self.rho = new_rho
         if self.model and self._benders_components_added: # Check if model is ready
-            self.logger.info(f"Updating regularization strength rho to {self.rho} in Gurobi model.")
+            self.logger.debug(f"Updating regularization strength rho to {self.rho} in Gurobi model.")
             self._update_gurobi_objective()
             self.model.update()
 
@@ -113,7 +113,7 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
         
         self.x_bar = new_x_bar.copy()
         if self.model and self._benders_components_added: # Check if model is ready
-            self.logger.info("Updating regularization center x_bar. Gurobi model components will be adjusted.")
+            self.logger.debug("Updating regularization center x_bar. Gurobi model components will be adjusted.")
             self._update_gurobi_model_for_x_bar_change()
             self.model.update()
 
@@ -318,7 +318,7 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
             self.model.update()
             self._model_created = True
             self._benders_components_added = True # Mark Benders-specific (eta, cuts) and regularized setup as complete
-            self.logger.info(f"Regularized Benders master problem '{model_name}' successfully created/rebuilt.")
+            self.logger.debug(f"Regularized Benders master problem '{model_name}' successfully created/rebuilt.")
 
         except gp.GurobiError as e:
             self.logger.critical(f"Gurobi error creating regularized master model '{model_name}': {e}", exc_info=True)
@@ -377,7 +377,7 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
             self._next_cut_id += 1 # Increment for the next cut
             
             # self.model.update() # Optional: batch updates might be better
-            self.logger.info(f"Added optimality cut ID {cut_id}: '{cut_name}' with transformed RHS for x_bar.")
+            self.logger.debug(f"Added optimality cut ID {cut_id}: '{cut_name}' with transformed RHS for x_bar.")
             return cut_id
         except gp.GurobiError as e:
             self.logger.error(f"Gurobi failed to add regularized optimality cut '{cut_name}': {e}", exc_info=True)
@@ -428,8 +428,8 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
                 else: # Should not happen if optimal and d_solution_values is not None
                     self.logger.warning("Optimal solution for d, but internal_objective_val is None.")
                     
-                self.logger.info(f"Solved regularized problem. Optimal d found. "
-                                 f"True x objective: {true_objective_value if true_objective_value is not None else 'N/A'}")
+                self.logger.debug(f"Solved regularized problem. Optimal d found. "
+                                 f"Regularized Master objective: {true_objective_value if true_objective_value is not None else 'N/A'}")
             else: # Should not happen if optimal
                 self.logger.warning("Optimal status, but d_solution_values is None.")
         else:
@@ -437,7 +437,7 @@ class RegularizedBendersMasterProblem(BendersMasterProblem):
             # For simplicity, we only calculate true_objective if optimal.
             # If needed, one could try to compute a "true" bound if internal_objective_val is a bound.
             true_objective_value = internal_objective_val # Or None, depending on desired behavior
-            self.logger.info(f"Regularized problem solved with status: {status_code}. "
+            self.logger.warning(f"Regularized problem solved with status: {status_code}. "
                              f"Internal objective: {internal_objective_val if internal_objective_val is not None else 'N/A'}")
 
 
