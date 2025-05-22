@@ -70,6 +70,8 @@ class BendersSolver:
         self.logger.info(f"ParallelSecondStageWorker initialized with {self.parallel_worker.num_workers} workers.")
 
         # 5. Generate Sample Pool (short_delta_r)
+        # set seed for reproducibility
+        np.random.seed(42)
         sample_pool_rhs_realizations = self.reader.sample_stochastic_rhs_batch(
             num_samples=self.config['NUM_SAMPLES_FOR_POOL']
         )
