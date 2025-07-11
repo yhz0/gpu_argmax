@@ -2,24 +2,27 @@ import unittest
 import numpy as np
 import h5py
 import os
+import sys
 
-# --- Assumed imports from your project ---
-# Ensure these modules are accessible (e.g., in PYTHONPATH or same directory)
+# This allows the script to be run from anywhere and still find the src module
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
+sys.path.append(PROJECT_ROOT)
+
 try:
-    from smps_reader import SMPSReader
-    from argmax_operation import ArgmaxOperation
+    from src.smps_reader import SMPSReader
+    from src.argmax_operation import ArgmaxOperation
 except ImportError as e:
     print(f"ERROR: Could not import SMPSReader or ArgmaxOperation: {e}")
-    print("Please ensure smps_reader.py and argmax_operation.py are accessible.")
+    print("Please ensure smps_reader.py and argmax_operation.py are in the 'src' directory.")
     raise # Stop execution if essential modules are missing
 
 # --- Configuration ---
 # Use __file__ to make paths relative to the location of this test script
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROB_NAME = "cep"
-SMPS_DATA_DIR = os.path.join(BASE_DIR, "smps_data", PROB_NAME)
-# Assuming the H5 results file is in the same directory as this test script
-H5_RESULTS_FILE = os.path.join(BASE_DIR, "cep_100scen_results.h5")
+SMPS_DATA_DIR = os.path.join(PROJECT_ROOT, "smps_data", PROB_NAME)
+# Assuming the H5 results file is in the project root directory
+H5_RESULTS_FILE = os.path.join(PROJECT_ROOT, "cep_100scen_results.h5")
 
 # SMPS file paths
 CORE_FILENAME = f"{PROB_NAME}.mps"

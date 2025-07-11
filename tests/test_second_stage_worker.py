@@ -4,9 +4,15 @@ import numpy as np
 from pathlib import Path
 import sys
 import gurobipy as gp # Needed for potential errors during worker init/solve
+import os
 
-from smps_reader import SMPSReader
-from second_stage_worker import SecondStageWorker
+# This allows the script to be run from anywhere and still find the src module
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
+sys.path.append(PROJECT_ROOT)
+
+from src.smps_reader import SMPSReader
+from src.second_stage_worker import SecondStageWorker
 
 class TestSecondStageWorkerAgainstSAA(unittest.TestCase):
     """
@@ -20,7 +26,7 @@ class TestSecondStageWorkerAgainstSAA(unittest.TestCase):
         Load reference HDF5 data and SMPS problem data once for all tests.
         This assumes the necessary files are present.
         """
-        cls.test_data_path = Path(".") # Adjust if test data is elsewhere
+        cls.test_data_path = Path(PROJECT_ROOT) # Adjust if test data is elsewhere
         cls.h5_file_path = cls.test_data_path / "cep_100scen_results.h5"
         cls.smps_base_path = cls.test_data_path / "smps_data/cep" # Base dir for SMPS files
         cls.smps_core_file = cls.smps_base_path / "cep.mps"

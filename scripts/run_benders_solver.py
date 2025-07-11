@@ -6,13 +6,18 @@ import scipy.linalg # Used in original script, ensure it's available
 import h5py # For loading initial basis
 import logging
 from pathlib import Path
+import sys
 
-# Assuming your custom modules are in the same directory or accessible via PYTHONPATH
-from smps_reader import SMPSReader
-from argmax_operation import ArgmaxOperation
-# from benders import BendersMasterProblem # For type hinting if Regularized inherits from it
-from regularized_benders import RegularizedBendersMasterProblem
-from parallel_second_stage_worker import ParallelSecondStageWorker
+# This allows the script to be run from anywhere and still find the src module
+script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.append(project_root)
+
+from src.smps_reader import SMPSReader
+from src.argmax_operation import ArgmaxOperation
+# from src.benders import BendersMasterProblem # For type hinting if Regularized inherits from it
+from src.regularized_benders import RegularizedBendersMasterProblem
+from src.parallel_second_stage_worker import ParallelSecondStageWorker
 
 class BendersSolver:
     def __init__(self, config, logger_name='BendersSolver'):
@@ -392,6 +397,8 @@ class BendersSolver:
 
 
 if __name__ == "__main__":
+    # Note: This script should be run from the project root directory
+    # for the relative paths to work correctly.
     logging.basicConfig(
         level=logging.INFO, 
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

@@ -4,8 +4,8 @@ import multiprocessing
 import os # For debugging process IDs, can be removed
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
-from smps_reader import SMPSReader
-from second_stage_worker import SecondStageWorker
+from .smps_reader import SMPSReader
+from .second_stage_worker import SecondStageWorker
 
 # These global variables will exist in each spawned worker process.
 _g_worker_instance: Optional[SecondStageWorker] = None

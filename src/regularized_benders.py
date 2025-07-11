@@ -3,7 +3,7 @@ import numpy as np
 import typing as t
 import logging
 
-from benders import BendersCutData, BendersMasterProblem # Assuming benders.py is in the same directory or accessible
+from .benders import BendersCutData, BendersMasterProblem # Assuming benders.py is in the same directory or accessible
 
 class RegularizedBendersMasterProblem(BendersMasterProblem):
     """

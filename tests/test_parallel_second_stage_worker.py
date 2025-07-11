@@ -2,13 +2,18 @@ import unittest
 import h5py
 import numpy as np
 from pathlib import Path
-# import sys # Not strictly needed for this version
+import sys
+import os
 # import gurobipy as gp # Not directly used in test logic, but good if worker can raise GurobiError
 
-# Assuming these modules are in the Python path
-from smps_reader import SMPSReader
+# This allows the script to be run from anywhere and still find the src module
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
+sys.path.append(PROJECT_ROOT)
+
+from src.smps_reader import SMPSReader
 # from second_stage_worker import SecondStageWorker # Not directly instantiated in the parallel test
-from parallel_second_stage_worker import ParallelSecondStageWorker # Import the class to be tested
+from src.parallel_second_stage_worker import ParallelSecondStageWorker # Import the class to be tested
 
 class TestParallelSecondStageWorkerAgainstSAA(unittest.TestCase):
     """
@@ -23,7 +28,7 @@ class TestParallelSecondStageWorkerAgainstSAA(unittest.TestCase):
         This assumes the necessary files ('cep_100scen_results.h5' and SMPS files for 'cep')
         are present in the expected locations.
         """
-        cls.test_data_path = Path(".") # Current directory by default
+        cls.test_data_path = Path(PROJECT_ROOT) # Current directory by default
         cls.h5_file_path = cls.test_data_path / "cep_100scen_results.h5"
         cls.smps_base_path = cls.test_data_path / "smps_data/cep"
         cls.smps_core_file = cls.smps_base_path / "cep.mps"
@@ -105,7 +110,7 @@ class TestParallelSecondStageWorkerAgainstSAA(unittest.TestCase):
             # The first-stage solution 'x' is common for all scenarios in this batch.
             # The short_delta_r_all contains deviations for all scenarios.
             # No basis information is passed for warm-start in this test, relying on default behavior.
-            obj_vals_batch, y_sols_batch, pi_sols_batch, rc_sols_batch, vbasis_batch_out, cbasis_batch_out = \
+            obj_vals_batch, y_sols_batch, pi_sols_batch, rc_sols_batch, vbasis_batch_out, cbasis_batch_out, _ = \
                 parallel_worker.solve_batch(
                     x=self.x_sol_ref,
                     short_delta_r_batch=self.short_delta_r_all

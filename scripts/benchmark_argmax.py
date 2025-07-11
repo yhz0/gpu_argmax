@@ -3,10 +3,15 @@ import time
 import numpy as np
 import torch
 import argparse
+import sys
 
-# Make sure these files are in the same directory or accessible in the Python path
-from smps_reader import SMPSReader
-from argmax_operation import ArgmaxOperation
+# This allows the script to be run from anywhere and still find the src module
+script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.append(project_root)
+
+from src.smps_reader import SMPSReader
+from src.argmax_operation import ArgmaxOperation
 
 def run_benchmark(N: int, M: int, DEVICE: str):
     """
@@ -25,7 +30,7 @@ def run_benchmark(N: int, M: int, DEVICE: str):
     print(f"[{time.strftime('%H:%M:%S')}] Loading SMPS data for 'ssn'...")
     try:
         instance_name = "ssn"
-        # Assumes 'smps_data' is a subdirectory relative to the script
+        # Assumes 'smps_data' is a subdirectory relative to the project root
         file_dir = os.path.join("smps_data", instance_name)
         core_filepath = os.path.join(file_dir, f"{instance_name}.mps")
         time_filepath = os.path.join(file_dir, f"{instance_name}.tim")
@@ -127,6 +132,8 @@ def run_benchmark(N: int, M: int, DEVICE: str):
 
 
 if __name__ == "__main__":
+    # Note: This script should be run from the project root directory
+    # for the relative paths to work correctly.
     parser = argparse.ArgumentParser(description="Benchmark script for ArgmaxOperation class.")
     parser.add_argument("N", type=int, help="Number of scenarios (e.g., 10000)")
     parser.add_argument("M", type=int, help="Number of dual vectors (e.g., 1000)")

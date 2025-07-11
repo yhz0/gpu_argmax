@@ -8,7 +8,7 @@ from abc import ABC
 
 import logging
 
-from master import AbstractMasterProblem # Assuming AbstractMasterProblem is in master.py
+from .master import AbstractMasterProblem # Assuming AbstractMasterProblem is in master.py
 
 # --- Definition of the TypedDict for Benders Cut Data ---
 class BendersCutData(TypedDict):

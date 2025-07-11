@@ -3,12 +3,17 @@ import os
 import numpy as np
 import scipy.sparse as sp
 from numpy import inf
+import sys
 
-from smps_reader import SMPSReader
+# This allows the script to be run from anywhere and still find the src module
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, os.pardir))
+sys.path.append(PROJECT_ROOT)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Assumes test script is runnable
+from src.smps_reader import SMPSReader
+
 PROB_NAME = "cep"
-FILE_DIR = os.path.join(BASE_DIR, "smps_data", PROB_NAME)
+FILE_DIR = os.path.join(PROJECT_ROOT, "smps_data", PROB_NAME)
 
 CORE_FILENAME = f"{PROB_NAME}.mps"
 TIME_FILENAME = f"{PROB_NAME}.tim"

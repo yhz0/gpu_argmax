@@ -1,4 +1,4 @@
-# all_in_one.py
+# build_saa.py
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -8,15 +8,18 @@ import scipy.sparse as sp # Import SciPy sparse
 from typing import Optional, List, Dict, Any, Tuple
 import time # For timing steps
 import h5py # Import HDF5 library
+import sys
 
-# Ensure the smps_reader.py file is in the same directory
-# or accessible via the Python path.
+# This allows the script to be run from anywhere and still find the src module
+script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, os.pardir))
+sys.path.append(project_root)
+
 try:
-    # Use the updated SMPSReader from the canvas artifact "smps_reader_py"
-    from smps_reader import SMPSReader
+    from src.smps_reader import SMPSReader
 except ImportError:
-    print("ERROR: Could not import SMPSReader.")
-    print("Ensure 'smps_reader.py' (with batch sampling) is in the same directory or Python path.")
+    print("ERROR: Could not import SMPSReader from src.")
+    print("Ensure 'smps_reader.py' is in the 'src' directory and the script is run from the project root.")
     exit(1)
 
 # --- Helper Function (can be outside the class) ---
@@ -919,11 +922,12 @@ if __name__ == "__main__":
 
     # --- Setup Paths ---
     script_dir_main = os.path.dirname(__file__) if '__file__' in locals() else os.getcwd()
-    file_dir_main = os.path.join(script_dir_main, base_dir_main, problem_name_main)
+    project_root_main = os.path.abspath(os.path.join(script_dir_main, os.pardir))
+    file_dir_main = os.path.join(project_root_main, base_dir_main, problem_name_main)
     core_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.mps") # Assume .mps, change if .cor
     time_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.tim")
     sto_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.sto")
-    hdf5_output_path = os.path.join(script_dir_main, output_hdf5_filename) # Save HDF5 in script dir
+    hdf5_output_path = os.path.join(project_root_main, output_hdf5_filename) # Save HDF5 in project root
 
     # --- Check if input files exist ---
     if not os.path.exists(core_filepath_main):
