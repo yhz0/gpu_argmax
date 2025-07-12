@@ -258,50 +258,33 @@ class ParallelSecondStageWorker:
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
                     cbasis_batch: Optional[np.ndarray] = None, nontrivial_rc_only = True) \
-                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                    -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Solves a batch of second-stage scenarios in parallel using a worker pool.
-        Parameters
-        ----------
-        x : np.ndarray
-            The first-stage solution vector to synchronize with workers.
-        short_delta_r_batch : np.ndarray
-            Batch of scenario-specific right-hand side modifications for the second-stage problems.
-            Shape: (num_scenarios, ...)
-        vbasis_batch : Optional[np.ndarray], optional
-            Optional batch of basis status arrays for variables, one per scenario.
-            Shape: (num_scenarios, num_y_vars)
-        cbasis_batch : Optional[np.ndarray], optional
-            Optional batch of basis status arrays for constraints, one per scenario.
-            Shape: (num_scenarios, num_stage2_constrs)
-        nontrivial_rc_only : bool, default=True
-            If True, only nontrivial reduced costs are returned; otherwise, all reduced costs are returned.
-        Returns
-        -------
-        obj_values_all : np.ndarray
-            Array of objective values for each scenario. Shape: (num_scenarios,)
-        y_solutions_all : np.ndarray
-            Array of solution vectors for second-stage variables for each scenario.
-            Shape: (num_scenarios, num_y_vars)
-        pi_solutions_all : np.ndarray
-            Array of dual variable solutions for each scenario.
-            Shape: (num_scenarios, num_stage2_constrs)
-        rc_solutions_all : np.ndarray
-            Array of reduced costs for each scenario.
-            Shape: (num_scenarios, rc_length)
-        vbasis_all : np.ndarray
-            Array of basis status for variables for each scenario.
-            Shape: (num_scenarios, num_y_vars)
-        cbasis_all : np.ndarray
-            Array of basis status for constraints for each scenario.
-            Shape: (num_scenarios, num_stage2_constrs)
-        Raises
-        ------
-        RuntimeError
-            If the worker has been closed or the worker pool is not initialized.
-        Notes
-        -----
+
         This method distributes the scenario solves across a pool of worker processes.
+        It ensures that all workers are synchronized with the provided first-stage
+        solution `x` before solving the scenarios.
+
+        Args:
+            x: The first-stage solution vector to synchronize with workers.
+            short_delta_r_batch: Batch of scenario-specific RHS modifications.
+            vbasis_batch: Optional batch of variable basis statuses.
+            cbasis_batch: Optional batch of constraint basis statuses.
+            nontrivial_rc_only: If True, returns only non-trivial reduced costs.
+
+        Returns:
+            A tuple containing:
+            - obj_values_all: Objective values for each scenario.
+            - y_solutions_all: Solution vectors for second-stage variables.
+            - pi_solutions_all: Dual variable solutions.
+            - rc_solutions_all: Reduced costs.
+            - vbasis_all: Basis statuses for variables.
+            - cbasis_all: Basis statuses for constraints.
+            - iter_count_all: Simplex iteration counts for each scenario.
+
+        Raises:
+            RuntimeError: If the worker has been closed or the pool is not initialized.
         """
 
         if self._closed:

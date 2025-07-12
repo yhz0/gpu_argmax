@@ -20,7 +20,18 @@ from src.regularized_benders import RegularizedBendersMasterProblem
 from src.parallel_second_stage_worker import ParallelSecondStageWorker
 
 class BendersSolver:
+    """
+    Orchestrates the Benders decomposition algorithm using a regularized master problem,
+    a parallelized second-stage solver, and a GPU-accelerated argmax operation for cut selection.
+    """
     def __init__(self, config, logger_name='BendersSolver'):
+        """
+        Initializes the BendersSolver with a configuration dictionary.
+
+        Args:
+            config (dict): A dictionary containing all the necessary parameters for the solver.
+            logger_name (str): The name for the logger instance.
+        """
         self.config = config
         self.logger = logging.getLogger(logger_name)
 
@@ -36,6 +47,9 @@ class BendersSolver:
         self.c_vector: np.ndarray = None # First-stage cost vector
 
     def _setup_problem(self):
+        """
+        Initializes and configures all components required for the Benders decomposition algorithm.
+        """
         self.logger.info("--- Starting Problem Setup ---")
         # 1. Load SMPS Data
         self.reader = SMPSReader(
@@ -130,6 +144,9 @@ class BendersSolver:
         self.logger.info("--- Problem Setup Complete ---")
 
     def _solve_master_problem(self):
+        """
+        Solves the regularized master problem and returns the solution and timing information.
+        """
         start_time = time.time()
         # isinstance check is fine, but since it's always RegularizedBendersMasterProblem:
         self.master_problem.set_regularization_strength(self.rho)
@@ -140,6 +157,15 @@ class BendersSolver:
         return x_next, master_total_obj_val, status_code, solve_time
 
     def _perform_argmax_operation(self, current_x: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray, float]:
+        """
+        Performs the argmax operation to calculate the estimated cost and select the best dual solutions.
+
+        Args:
+            current_x: The current first-stage decision vector.
+
+        Returns:
+            A tuple containing the estimated cost, scores, indices of best solutions, and execution time.
+        """
         start_time = time.time()
         cut_info = self.argmax_op.calculate_cut(current_x)
         
@@ -182,6 +208,19 @@ class BendersSolver:
         return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all, solve_time
 
     def _update_argmax_duals(self, pi_all, rc_all, vbasis_out, cbasis_out, scores_difference=None):
+        """
+        Updates the ArgmaxOperation with new dual solutions based on score differences.
+
+        Args:
+            pi_all: All dual variables from the subproblems.
+            rc_all: All reduced costs from the subproblems.
+            vbasis_out: All variable basis statuses from the subproblems.
+            cbasis_out: All constraint basis statuses from the subproblems.
+            scores_difference: The difference between subproblem and argmax scores.
+
+        Returns:
+            A tuple containing the coverage fraction, the number of added duals, and the execution time.
+        """
         start_time = time.time()
         num_to_add = self.config.get('num_duals_to_add_per_iteration', 10000)
         ARGMAX_CUTOFF_TOLERANCE = self.config.get('argmax_tol_cutoff', 1e-4)
@@ -225,6 +264,16 @@ class BendersSolver:
         return coverage_fraction, added_count, update_time
 
     def _calculate_and_add_cut(self, current_x, pi_all_from_subproblems):
+        """
+        Calculates a new Benders cut and adds it to the master problem if it's violated.
+
+        Args:
+            current_x: The current first-stage decision vector.
+            pi_all_from_subproblems: All dual variables from the subproblems.
+
+        Returns:
+            A tuple containing the actual cost, a boolean indicating if a cut was added, and the execution time.
+        """
         start_time = time.time()
         
         if pi_all_from_subproblems.shape[0] == 0:
@@ -263,6 +312,12 @@ class BendersSolver:
         return subproblem_actual_q_x, cut_added, calc_time
 
     def _log_iteration_data(self, iteration_metrics):
+        """
+        Logs the metrics for a single iteration of the Benders decomposition algorithm.
+
+        Args:
+            iteration_metrics (dict): A dictionary containing the metrics for the iteration.
+        """
         log_metrics = {}
         for key, value in iteration_metrics.items():
             if isinstance(value, np.ndarray):
@@ -289,6 +344,9 @@ class BendersSolver:
         self.logger.info(" | ".join(log_parts))
 
     def run(self):
+        """
+        Executes the Benders decomposition algorithm.
+        """
         self._setup_problem()
 
         if self.x_init is None: # Should have been handled by _setup_problem
@@ -391,7 +449,10 @@ class BendersSolver:
         self.logger.info("--- Benders Decomposition Loop Finished ---")
         self.cleanup() # Call cleanup
 
-    def cleanup(self): # Added cleanup method
+    def cleanup(self):
+        """
+        Cleans up resources used by the solver.
+        """
         self.logger.info("BendersSolver cleanup called.")
         # Implement any specific resource cleanup if needed, e.g., for parallel_worker if it has a shutdown method.
 

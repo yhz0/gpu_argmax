@@ -34,7 +34,16 @@ class AbstractMasterProblem(ABC):
                  constr_names: t.Optional[t.List[str]] = None):
         """
         Initializes the master problem holder with core problem data.
-        (Args description omitted for brevity - see previous version)
+
+        Args:
+            c: Cost vector for the first-stage variables 'x'.
+            A: Constraint matrix for first-stage constraints Ax R1 b.
+            b: Right-hand side vector for first-stage constraints.
+            sense1: Sense array for first-stage constraints (e.g., '<', '=', '>').
+            lb_x: Lower bounds for 'x' variables.
+            ub_x: Upper bounds for 'x' variables.
+            var_names: Optional list of names for 'x' variables.
+            constr_names: Optional list of names for first-stage constraints.
         """
         # --- Store Core Problem Data ---
         self.c = c.copy()
