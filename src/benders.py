@@ -416,6 +416,29 @@ class BendersMasterProblem(AbstractMasterProblem):
 
         return current_max_rhs
 
+    def calculate_estimated_objective(self, x: np.ndarray) -> float:
+        """
+        Calculates the estimated objective value for a given first-stage solution 'x'.
+        The value is c'x + eta_hat, where eta_hat is the estimated value of the
+        second-stage problem, calculated from the existing Benders cuts.
+
+        Args:
+            x: A numpy array representing the first-stage decision variables.
+
+        Returns:
+            The estimated total objective value.
+        """
+        if not isinstance(x, np.ndarray) or x.shape != (self.num_x,):
+            raise ValueError(f"Input x must be a numpy array of shape ({self.num_x},), but got {x.shape}")
+        
+        # c'x part of the objective
+        first_stage_cost = self.c @ x
+        
+        # Estimated second-stage cost (eta)
+        estimated_eta = self.calculate_epigraph_value(x)
+        
+        return first_stage_cost + estimated_eta
+
     def close(self):
         """
         Disposes of the Gurobi model and environment, and performs cleanup
