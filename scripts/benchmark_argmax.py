@@ -129,16 +129,3 @@ def run_benchmark(N: int, M: int, DEVICE: str):
     
     print(f"\nExecution time for calculate_cut: {elapsed_time_ms:.2f} ms")
     print("------------------------------------------")
-
-
-if __name__ == "__main__":
-    # Note: This script should be run from the project root directory
-    # for the relative paths to work correctly.
-    parser = argparse.ArgumentParser(description="Benchmark script for ArgmaxOperation class.")
-    parser.add_argument("N", type=int, help="Number of scenarios (e.g., 10000)")
-    parser.add_argument("M", type=int, help="Number of dual vectors (e.g., 1000)")
-    parser.add_argument("DEVICE", type=str, choices=['cuda', 'cpu'], help="Device to run on ('cuda' or 'cpu')")
-    
-    args = parser.parse_args()
-    
-    run_benchmark(args.N, args.M, args.DEVICE)

@@ -764,7 +764,8 @@ class SAABuilder:
                 meta_grp = f.create_group("metadata")
                 meta_grp.attrs['problem_name'] = os.path.basename(self.core_filepath).split('.')[0]
                 meta_grp.attrs['num_scenarios'] = self.num_scenarios
-                meta_grp.attrs['random_seed'] = self.random_seed
+                if self.random_seed is not None:
+                    meta_grp.attrs['random_seed'] = self.random_seed
                 meta_grp.attrs['num_x'] = self.num_x
                 meta_grp.attrs['num_y'] = self.num_y
                 meta_grp.attrs['num_cons1'] = self.num_cons1
@@ -908,75 +909,3 @@ class SAABuilder:
 
 
 # --- Main Execution Block ---
-if __name__ == "__main__":
-
-    overall_start_time_main = time.time()
-
-    # --- Configuration ---
-    base_dir_main = "smps_data"
-    problem_name_main = "ssn"  # Example problem name
-    num_scenarios_main = 5000 # Reduced for quicker testing
-    num_threads_main = None # Use Gurobi default or specify (e.g., 4)
-    random_seed_main = 42
-    output_hdf5_filename = f"{problem_name_main}_{num_scenarios_main}scen_results.h5"
-
-    # --- Setup Paths ---
-    script_dir_main = os.path.dirname(__file__) if '__file__' in locals() else os.getcwd()
-    project_root_main = os.path.abspath(os.path.join(script_dir_main, os.pardir))
-    file_dir_main = os.path.join(project_root_main, base_dir_main, problem_name_main)
-    core_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.mps") # Assume .mps, change if .cor
-    time_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.tim")
-    sto_filepath_main = os.path.join(file_dir_main, f"{problem_name_main}.sto")
-    hdf5_output_path = os.path.join(project_root_main, output_hdf5_filename) # Save HDF5 in project root
-
-    # --- Check if input files exist ---
-    if not os.path.exists(core_filepath_main):
-        print(f"ERROR: Core file not found at {core_filepath_main}")
-        exit(1)
-    if not os.path.exists(time_filepath_main):
-        print(f"ERROR: Time file not found at {time_filepath_main}")
-        # Some problems might not have .tim if structure is fully in .mps
-        # Decide if this is critical. For now, let's assume it is if sto is present.
-        if os.path.exists(sto_filepath_main):
-             print("...and .sto file exists, so .tim is likely needed.")
-             exit(1)
-        else:
-             print("...but no .sto file either. Assuming a deterministic problem or different format.")
-    if not os.path.exists(sto_filepath_main):
-        print(f"WARNING: Sto file not found at {sto_filepath_main}. Assuming deterministic problem or simple recourse.")
-        # Allow continuation, but SAABuilder might behave unexpectedly if stochasticity is implied elsewhere.
-
-
-    # --- Instantiate and Run ---
-    print(f"--- Starting SAA for {problem_name_main} ---")
-    print(f"Input files directory: {file_dir_main}")
-    print(f"Number of scenarios: {num_scenarios_main}")
-    print(f"Output HDF5 file: {hdf5_output_path}")
-    print("-" * 40)
-
-
-    saa_builder = SAABuilder(
-        core_filepath=core_filepath_main,
-        time_filepath=time_filepath_main,
-        sto_filepath=sto_filepath_main,
-        num_scenarios=num_scenarios_main,
-        random_seed=random_seed_main,
-        num_threads=num_threads_main
-    )
-
-    # Execute the full process including solve and saving HDF5
-    saa_builder.run_pipeline(solve_model=True, save_hdf5=True, hdf5_filepath=hdf5_output_path)
-
-    # --- Print Timings ---
-    print("\n--- Timing Summary ---")
-    # Sort timings for better readability
-    sorted_timing = sorted(saa_builder.timing.items(), key=lambda item: item[1], reverse=True)
-    for step, duration in sorted_timing:
-        # Indent sub-steps for clarity
-        indent = "  " if step not in ['load_smps', 'generate_scenarios', 'build_model_total', 'solve_model', 'extract_basis', 'save_hdf5', 'full_pipeline'] else ""
-        print(f"  {indent}{step}: {duration:.3f}s")
-
-
-    overall_end_time_main = time.time()
-    print("-" * 40)
-    print(f"Script finished. (Total Wall Clock Time: {overall_end_time_main - overall_start_time_main:.2f}s)")
