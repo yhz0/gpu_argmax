@@ -299,14 +299,7 @@ class BendersSolver:
         cut_added = False
         if subproblem_actual_q_x > current_master_epigraph_eta_at_x + self.config['tolerance']:
             self.master_problem.add_optimality_cut(beta, alpha)
-            self.rho *= self.config.get('rho_increase_factor', 1.01)
             cut_added = True
-            self.logger.debug(f"Cut added. New rho: {self.rho:.4e}")
-        else:
-            self.rho *= self.config.get('rho_decrease_factor', 0.98)
-            min_rho = self.config.get('min_rho', 1e-5)
-            if self.rho < min_rho: self.rho = min_rho
-            self.logger.debug(f"No cut added. New rho: {self.rho:.4e}")
 
         calc_time = time.time() - start_time
         return subproblem_actual_q_x, cut_added, calc_time

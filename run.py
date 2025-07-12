@@ -63,14 +63,16 @@ def main():
                 'SCENARIO_BATCH_SIZE': 1000,
                 'NUM_SAMPLES_FOR_POOL': 100000,
                 'ETA_LOWER_BOUND': 0.0,
-                'initial_rho': 100,
-                'rho_increase_factor': 1.05,
-                'rho_decrease_factor': 0.95,
+                'initial_rho': 1.0,
+                'rho_increase_factor': 2.0,
+                'rho_decrease_factor': 0.5,
                 'min_rho': 1e-6,
+                'gamma': 0.5,
                 'tolerance': 1e-4,
                 'max_iterations': 20,
                 'num_duals_to_add_per_iteration': 10000,
-                'argmax_tol_cutoff': 1e2,
+                'argmax_tol_cutoff': 1e-3,
+                'num_workers': 4,
                 'instance_name': "benders_run"
             }
         else:
