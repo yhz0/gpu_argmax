@@ -29,6 +29,12 @@ def main():
     benders_group.add_argument("--config", type=str, help="Path to a JSON configuration file. Defaults to benders_config.json")
     benders_group.add_argument("--manual-config", nargs=4, metavar=('CORE_FILE', 'TIME_FILE', 'STO_FILE', 'H5_BASIS_FILE'), help="Manual configuration.")
 
+    # Incumbent Benders subcommand
+    parser_incumbent_benders = subparsers.add_parser("incumbent_benders", help="Run the Benders solver with incumbent strategy.")
+    incumbent_benders_group = parser_incumbent_benders.add_mutually_exclusive_group()
+    incumbent_benders_group.add_argument("--config", type=str, help="Path to a JSON configuration file. Defaults to benders_config.json")
+    incumbent_benders_group.add_argument("--manual-config", nargs=4, metavar=('CORE_FILE', 'TIME_FILE', 'STO_FILE', 'H5_BASIS_FILE'), help="Manual configuration.")
+
     args = parser.parse_args()
 
     if args.command == "benchmark":
@@ -74,6 +80,50 @@ def main():
                 'argmax_tol_cutoff': 1e-3,
                 'num_workers': 4,
                 'instance_name': "benders_run"
+            }
+        else:
+            # Default to benders_config.json
+            config_path = "benders_config.json"
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        
+        logging.basicConfig(
+            level=logging.INFO, 
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        solver = BendersSolver(config=config)
+        solver.run()
+    elif args.command == "incumbent_benders":
+        from scripts.run_incumbent_benders_solver import BendersSolver
+        config = None
+        if args.config:
+            config_path = args.config
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        elif args.manual_config:
+            config = {
+                'smps_core_file': args.manual_config[0],
+                'smps_time_file': args.manual_config[1],
+                'smps_sto_file': args.manual_config[2],
+                'input_h5_basis_file': args.manual_config[3],
+                'MAX_PI': 200000,
+                'MAX_OMEGA': 100000,
+                'SCENARIO_BATCH_SIZE': 1000,
+                'NUM_SAMPLES_FOR_POOL': 100000,
+                'ETA_LOWER_BOUND': 0.0,
+                'initial_rho': 1.0,
+                'rho_increase_factor': 2.0,
+                'rho_decrease_factor': 0.5,
+                'min_rho': 1e-6,
+                'gamma': 0.5,
+                'tolerance': 1e-4,
+                'max_iterations': 20,
+                'num_duals_to_add_per_iteration': 10000,
+                'argmax_tol_cutoff': 1e-3,
+                'num_workers': 4,
+                'instance_name': "incumbent_benders_run"
             }
         else:
             # Default to benders_config.json
