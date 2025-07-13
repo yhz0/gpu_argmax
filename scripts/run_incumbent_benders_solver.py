@@ -131,9 +131,10 @@ class BendersSolver:
 
         except Exception as e:
             self.logger.error(f"Error loading initial basis from {h5_path}: {e}", exc_info=True)
-            num_x_vars = len(self.reader.stage1_var_names) if hasattr(self.reader, 'stage1_var_names') and self.reader.stage1_var_names else self.c_vector.shape[0]
-            self.x_init = np.zeros(num_x_vars) 
-            self.logger.warning(f"Defaulting x_init to zeros due to HDF5 loading error.")
+            raise # Ensure the error is raised to stop execution if loading fails
+            # num_x_vars = len(self.reader.stage1_var_names)
+            # self.x_init = np.zeros(num_x_vars) 
+            # self.logger.warning(f"Defaulting x_init to zeros due to HDF5 loading error.")
         
         if self.x_init is None or self.x_init.shape[0] != self.c_vector.shape[0]:
             self.logger.warning(
@@ -322,6 +323,8 @@ class BendersSolver:
         
         # UPDATED LOGGING TERMS
         log_parts = [f"Iter: {log_metrics.get('iteration', 'N/A'):>3}"]
+        log_parts.append(f"Success: {'Y' if log_metrics.get('successful_step', False) else 'N'}")
+        log_parts.append(f"FCD: {log_metrics.get('fcd', float('inf')):.4f}")
         log_parts.append(f"CostMaster: {log_metrics.get('cost_from_master', float('nan')):.4e}")
         log_parts.append(f"CostCut: {log_metrics.get('cost_from_cut', float('nan')):.4e}")
         log_parts.append(f"Gap: {log_metrics.get('gap', float('nan')):.4e}")
@@ -333,7 +336,6 @@ class BendersSolver:
                          f"A:{log_metrics.get('argmax_op_time',0):.2f}s, "
                          f"S:{log_metrics.get('subproblem_solve_time',0):.2f}s, "
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
-        log_parts.append(f"SimplexIter: {log_metrics.get('mean_simplex_iter', 0):.2f} (0-iter: {log_metrics.get('num_zero_iter', 0)})")
         log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
         log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")
         self.logger.info(" | ".join(log_parts))
@@ -403,11 +405,11 @@ class BendersSolver:
             # 6. Update incumbent and rho based on progress
             successful_step = actual_decrease >= gamma * perceived_decrease
             if successful_step:
-                self.logger.info(f"Iter {iter_count}: Successful step. Updating incumbent and decreasing rho.")
+                self.logger.debug(f"Iter {iter_count}: Successful step. Updating incumbent and decreasing rho.")
                 self.x_incumbent = self.x_candidate.copy()
                 self.rho = max(min_rho, self.rho * rho_decrease_factor)
             else:
-                self.logger.info(f"Iter {iter_count}: Unsuccessful step. Increasing rho.")
+                self.logger.debug(f"Iter {iter_count}: Unsuccessful step. Increasing rho.")
                 self.rho = self.rho * rho_increase_factor
             
             fcd = actual_decrease / perceived_decrease if perceived_decrease != 0 else float('inf')
