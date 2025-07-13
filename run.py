@@ -35,6 +35,12 @@ def main():
     incumbent_benders_group.add_argument("--config", type=str, help="Path to a JSON configuration file. Defaults to benders_config.json")
     incumbent_benders_group.add_argument("--manual-config", nargs=4, metavar=('CORE_FILE', 'TIME_FILE', 'STO_FILE', 'H5_BASIS_FILE'), help="Manual configuration.")
 
+    # SMPS reader subcommand
+    parser_smps_reader = subparsers.add_parser("smps_reader", help="Run the SMPS reader script.")
+    parser_smps_reader.add_argument("--core-file", type=str, required=True, help="Path to the .cor or .mps file.")
+    parser_smps_reader.add_argument("--time-file", type=str, required=True, help="Path to the .tim file.")
+    parser_smps_reader.add_argument("--sto-file", type=str, required=True, help="Path to the .sto file.")
+
     args = parser.parse_args()
 
     if args.command == "benchmark":
@@ -139,6 +145,16 @@ def main():
         
         solver = BendersSolver(config=config)
         solver.run()
+    elif args.command == "smps_reader":
+        from src.smps_reader import SMPSReader
+        reader = SMPSReader(
+            core_file=args.core_file,
+            time_file=args.time_file,
+            sto_file=args.sto_file
+        )
+        reader.load_and_extract()
+        reader.print_summary()
+
 
 if __name__ == "__main__":
     main()
