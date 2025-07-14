@@ -111,6 +111,8 @@ class ArgmaxOperation:
         self.short_pi_gpu = torch.zeros((MAX_PI, self.R_SPARSE_LEN), dtype=torch_dtype, device=self.device)
         self.lb_gpu = torch.from_numpy(lb_y_bounded).to(dtype=torch_dtype, device=self.device)
         self.ub_gpu = torch.from_numpy(ub_y_bounded).to(dtype=torch_dtype, device=self.device)
+        self.lb_gpu_f32 = self.lb_gpu.to(torch.float32)
+        self.ub_gpu_f32 = self.ub_gpu.to(torch.float32)
         self.r_bar_gpu = torch.from_numpy(r_bar).to(dtype=torch_dtype, device=self.device)
         self.r_sparse_indices_gpu = torch.from_numpy(self.r_sparse_indices_cpu).to(dtype=torch.long, device=self.device) # LongTensor for indexing
         self.short_delta_r_gpu = torch.zeros((MAX_OMEGA, self.R_SPARSE_LEN), dtype=torch_dtype, device=self.device)
@@ -368,10 +370,8 @@ class ArgmaxOperation:
             lambda_all_k = torch.clamp(active_rc_gpu, min=0)
             mu_all_k = torch.clamp(-active_rc_gpu, min=0)
 
-            lb_gpu_f32 = self.lb_gpu.to(torch.float32)
-            ub_gpu_f32 = self.ub_gpu.to(torch.float32)
-            lambda_l_term_all_k = torch.matmul(lambda_all_k, lb_gpu_f32) 
-            mu_u_term_all_k = torch.matmul(mu_all_k, ub_gpu_f32)      
+            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32) 
+            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)      
 
             constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k # (num_pi,)
 
@@ -411,6 +411,7 @@ class ArgmaxOperation:
                 del scores_batch 
                 all_best_k_indices[start_scenario_idx:end_scenario_idx] = best_k_index_batch.to(torch.int32)
                 all_best_k_scores[start_scenario_idx:end_scenario_idx] = best_k_scores_batch
+                del best_k_scores_batch
 
                 # --- Step 3 (Batch): Compute s_i = short_pi_k*^T * short_delta_r_i for the best k* ---
                 # Need to select the scores from stochastic_score_part_batch that correspond to the best_k_index_batch
@@ -433,7 +434,7 @@ class ArgmaxOperation:
 
             # --- Cleanup precomputed tensors ---
             del lambda_all_k, mu_all_k, lambda_l_term_all_k, mu_u_term_all_k
-            del constant_score_part_all_k, pi_h_bar_term_all_k, h_bar_gpu, Cx_gpu
+            del constant_score_part_all_k, pi_h_bar_term_all_k, h_bar_gpu, Cx_gpu, x_gpu
 
             # --- Calculate final averages ---
             Avg_Pi = total_selected_pi_sum / self.num_scenarios

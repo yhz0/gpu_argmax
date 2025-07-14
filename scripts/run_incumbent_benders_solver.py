@@ -375,6 +375,10 @@ class BendersSolver:
             perceived_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
                                  self.master_problem.calculate_estimated_objective(self.x_candidate)
 
+            if perceived_decrease < 0.0:
+                self.logger.warning(f"Iteration {iter_count}: Perceived decrease is negative ({perceived_decrease:.4f}). Numerical issues may be present.")
+                perceived_decrease = 0.0
+            
             # 2. Warmstart: Calculate cut with existing duals in ArgmaxOperation
             argmax_estim_q_x, best_k_scores, best_k_indices_for_basis, argmax_time = self._perform_argmax_operation(self.x_candidate)
     
