@@ -348,130 +348,210 @@ class ArgmaxOperation:
         if self.num_scenarios == 0: print("Error: No scenarios stored."); return None
         if x.shape != (self.X_DIM,): raise ValueError("x shape mismatch.")
 
+        # --- VRAM Monitoring Setup ---
+        initial_mem = 0.0
+        if self.device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(self.device)
+            initial_mem = torch.cuda.memory_allocated(self.device) / 1024**3
+
+        # --- Initialize result variables ---
+        alpha = None
+        beta = None
+        best_k_scores_cpu = None
+        best_k_index_cpu = None
+
         with torch.no_grad(): # Disable gradient tracking
-            # --- Prepare device data views ---
-            active_pi_gpu = self.pi_gpu[:self.num_pi]  # Shape (num_pi, NUM_STAGE2_ROWS)
-            active_rc_gpu = self.rc_gpu[:self.num_pi]  # Shape (num_pi, NUM_BOUNDED_VARS)
-            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi] # Shape (num_pi, R_SPARSE_LEN)
+            # --- Pre-allocate batch buffers and tensors ---
+            stochastic_score_part_buffer = None
+            scores_buffer = None
+            best_k_scores_buffer = None
+            best_k_index_buffer = None
+            batch_indices_buffer = None
+            s_gpu_buffer = None
+            selected_pi_buffer = None
+            selected_lambda_buffer = None
+            selected_mu_buffer = None
             
-            # active_scenario_data_gpu has shape (num_scenarios, R_SPARSE_LEN)
-            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :] 
-            x_gpu = torch.from_numpy(x).to(dtype=self.C_gpu.dtype, device=self.device)
+            # Other tensors for cleanup
+            lambda_all_k = None
+            mu_all_k = None
+            lambda_l_term_all_k = None
+            mu_u_term_all_k = None
+            constant_score_part_all_k = None
+            pi_h_bar_term_all_k = None
+            h_bar_gpu = None
+            Cx_gpu = None
+            x_gpu = None
 
-            # --- Precompute terms constant across ALL scenarios ---
-            # 1. Calculate h_bar = r_bar - C*x
-            Cx_gpu = torch.matmul(self.C_gpu, x_gpu) 
-            h_bar_gpu = self.r_bar_gpu - Cx_gpu    
+            try:
+                # --- Prepare device data views ---
+                active_pi_gpu = self.pi_gpu[:self.num_pi]  # Shape (num_pi, NUM_STAGE2_ROWS)
+                active_rc_gpu = self.rc_gpu[:self.num_pi]  # Shape (num_pi, NUM_BOUNDED_VARS)
+                active_short_pi_gpu = self.short_pi_gpu[:self.num_pi] # Shape (num_pi, R_SPARSE_LEN)
+                
+                # active_scenario_data_gpu has shape (num_scenarios, R_SPARSE_LEN)
+                active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :] 
+                x_gpu = torch.from_numpy(x).to(dtype=self.C_gpu.dtype, device=self.device)
 
-            # 2. Calculate pi_k^T * h_bar for all k
-            pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu) # (num_pi,)
+                # --- Precompute terms constant across ALL scenarios ---
+                # 1. Calculate h_bar = r_bar - C*x
+                Cx_gpu = torch.matmul(self.C_gpu, x_gpu) 
+                h_bar_gpu = self.r_bar_gpu - Cx_gpu    
 
-            # 3. Calculate bound terms: - lambda_k^T * l + mu_k^T * u for all k
-            lambda_all_k = torch.clamp(active_rc_gpu, min=0)
-            mu_all_k = torch.clamp(-active_rc_gpu, min=0)
+                # 2. Calculate pi_k^T * h_bar for all k
+                pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu) # (num_pi,)
 
-            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32) 
-            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)      
+                # 3. Calculate bound terms: - lambda_k^T * l + mu_k^T * u for all k
+                lambda_all_k = torch.clamp(active_rc_gpu, min=0)
+                mu_all_k = torch.clamp(-active_rc_gpu, min=0)
 
-            constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k # (num_pi,)
+                lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32) 
+                mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)      
 
-            # --- Initialize accumulators (float64 for precision) and result array ---
-            total_selected_pi_sum = torch.zeros(self.NUM_STAGE2_ROWS, dtype=torch.float64, device=self.device)
-            total_selected_lambda_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
-            total_selected_mu_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
-            total_s_sum = torch.zeros((), dtype=torch.float64, device=self.device) # scalar
-            all_best_k_indices = torch.zeros(self.num_scenarios, dtype=torch.int32, device=self.device)
-            all_best_k_scores = torch.zeros(self.num_scenarios, dtype=torch.float32, device=self.device)
-            # --- Process scenarios in batches ---
-            num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
-            # print(f"[{time.strftime('%H:%M:%S')}] Processing {self.num_scenarios} scenarios in {num_batches} batches of size {self.scenario_batch_size}...")
+                constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k # (num_pi,)
 
-            for i in range(num_batches):
-                # start_idx and end_idx now refer to scenario indices (rows)
-                start_scenario_idx = i * self.scenario_batch_size
-                end_scenario_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
-                current_batch_size = end_scenario_idx - start_scenario_idx
+                # --- Pre-allocate batch buffers for reuse (memory optimization) ---
+                max_batch_size = self.scenario_batch_size
+                stochastic_score_part_buffer = torch.empty((max_batch_size, self.num_pi), 
+                                                         dtype=torch.float32, device=self.device)
+                scores_buffer = torch.empty((max_batch_size, self.num_pi), 
+                                          dtype=torch.float32, device=self.device)
+                best_k_scores_buffer = torch.empty(max_batch_size, dtype=torch.float32, device=self.device)
+                best_k_index_buffer = torch.empty(max_batch_size, dtype=torch.long, device=self.device)
+                batch_indices_buffer = torch.arange(max_batch_size, device=self.device)
+                s_gpu_buffer = torch.empty(max_batch_size, dtype=torch.float32, device=self.device)
+                selected_pi_buffer = torch.empty((max_batch_size, self.NUM_STAGE2_ROWS), 
+                                               dtype=torch.float32, device=self.device)
+                selected_lambda_buffer = torch.empty((max_batch_size, self.NUM_BOUNDED_VARS), 
+                                                   dtype=torch.float32, device=self.device)
+                selected_mu_buffer = torch.empty((max_batch_size, self.NUM_BOUNDED_VARS), 
+                                               dtype=torch.float32, device=self.device)
 
-                # batch_scenario_slice has shape (current_batch_size, R_SPARSE_LEN)
-                batch_scenario_slice = active_scenario_data_gpu[start_scenario_idx:end_scenario_idx, :] 
+                # --- VRAM monitoring after buffer allocation ---
+                if self.device.type == 'cuda':
+                    after_buffer_alloc = torch.cuda.memory_allocated(self.device) / 1024**3
+                    buffer_mem_delta = after_buffer_alloc - initial_mem
+                    print(f"    VRAM after buffer allocation: {after_buffer_alloc:.2f} GB (+{buffer_mem_delta:.2f} GB)")
 
-                # --- Step 1 (Batch): Compute Stochastic Score Part ---
-                # stochastic_score_part = delta_r(omega_i)^T * short_pi_k  (for each omega_i, pi_k pair)
-                # active_short_pi_gpu.T has shape (R_SPARSE_LEN, num_pi)
-                # Resulting stochastic_score_part_batch shape: (current_batch_size, num_pi)
-                stochastic_score_part_batch = torch.matmul(batch_scenario_slice, active_short_pi_gpu.T)
+                # --- Initialize accumulators (float64 for precision) and result arrays ---
+                total_selected_pi_sum = torch.zeros(self.NUM_STAGE2_ROWS, dtype=torch.float64, device=self.device)
+                total_selected_lambda_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
+                total_selected_mu_sum = torch.zeros(self.NUM_BOUNDED_VARS, dtype=torch.float64, device=self.device)
+                total_s_sum = torch.zeros((), dtype=torch.float64, device=self.device) # scalar
+                all_best_k_indices = torch.zeros(self.num_scenarios, dtype=torch.int32, device=self.device)
+                all_best_k_scores = torch.zeros(self.num_scenarios, dtype=torch.float32, device=self.device)
 
-                # --- Step 2 (Batch): Compute Total Score and Select Best k* ---
-                # constant_score_part_all_k has shape (num_pi,). Broadcasting adds it to each row.
-                # scores_batch shape: (current_batch_size, num_pi)
-                scores_batch = stochastic_score_part_batch + constant_score_part_all_k 
-                # argmax along dim=1 to find best pi_k for each scenario (row)
-                best_k_scores_batch, best_k_index_batch = torch.max(scores_batch, dim=1) # Shape (current_batch_size,), (current_batch_size,)
+                # --- Process scenarios in batches ---
+                num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
+                # print(f"[{time.strftime('%H:%M:%S')}] Processing {self.num_scenarios} scenarios in {num_batches} batches of size {self.scenario_batch_size}...")
 
-                del scores_batch 
-                all_best_k_indices[start_scenario_idx:end_scenario_idx] = best_k_index_batch.to(torch.int32)
-                all_best_k_scores[start_scenario_idx:end_scenario_idx] = best_k_scores_batch
-                del best_k_scores_batch
+                for i in range(num_batches):
+                    # start_idx and end_idx now refer to scenario indices (rows)
+                    start_scenario_idx = i * self.scenario_batch_size
+                    end_scenario_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
+                    current_batch_size = end_scenario_idx - start_scenario_idx
 
-                # --- Step 3 (Batch): Compute s_i = short_pi_k*^T * short_delta_r_i for the best k* ---
-                # Need to select the scores from stochastic_score_part_batch that correspond to the best_k_index_batch
-                batch_indices_for_s = torch.arange(current_batch_size, device=self.device)
-                # Indexing into stochastic_score_part_batch (current_batch_size, num_pi)
-                s_gpu_batch = stochastic_score_part_batch[batch_indices_for_s, best_k_index_batch] # Shape (current_batch_size,)
-                del stochastic_score_part_batch, batch_indices_for_s # Free memory
+                    # batch_scenario_slice has shape (current_batch_size, R_SPARSE_LEN)
+                    batch_scenario_slice = active_scenario_data_gpu[start_scenario_idx:end_scenario_idx, :] 
 
-                # --- Step 4 (Batch): Accumulate Results using float64 ---
-                selected_pi_batch = active_pi_gpu[best_k_index_batch]
-                selected_lambda_batch = lambda_all_k[best_k_index_batch] 
-                selected_mu_batch = mu_all_k[best_k_index_batch]     
-                del best_k_index_batch 
+                    # --- Use slices of pre-allocated buffers ---
+                    stochastic_score_part_batch = stochastic_score_part_buffer[:current_batch_size, :]
+                    scores_batch = scores_buffer[:current_batch_size, :]
+                    best_k_scores_batch = best_k_scores_buffer[:current_batch_size]
+                    best_k_index_batch = best_k_index_buffer[:current_batch_size]
+                    batch_indices_for_s = batch_indices_buffer[:current_batch_size]
+                    s_gpu_batch = s_gpu_buffer[:current_batch_size]
+                    selected_pi_batch = selected_pi_buffer[:current_batch_size, :]
+                    selected_lambda_batch = selected_lambda_buffer[:current_batch_size, :]
+                    selected_mu_batch = selected_mu_buffer[:current_batch_size, :]
 
-                total_selected_pi_sum += torch.sum(selected_pi_batch, dim=0, dtype=torch.float64)
-                total_selected_lambda_sum += torch.sum(selected_lambda_batch, dim=0, dtype=torch.float64)
-                total_selected_mu_sum += torch.sum(selected_mu_batch, dim=0, dtype=torch.float64)
-                total_s_sum += torch.sum(s_gpu_batch, dtype=torch.float64)
-                del selected_pi_batch, selected_lambda_batch, selected_mu_batch, s_gpu_batch 
+                    # --- Step 1 (Batch): Compute Stochastic Score Part ---
+                    # stochastic_score_part = delta_r(omega_i)^T * short_pi_k  (for each omega_i, pi_k pair)
+                    # active_short_pi_gpu.T has shape (R_SPARSE_LEN, num_pi)
+                    # Resulting stochastic_score_part_batch shape: (current_batch_size, num_pi)
+                    torch.matmul(batch_scenario_slice, active_short_pi_gpu.T, out=stochastic_score_part_batch)
 
-            # --- Cleanup precomputed tensors ---
-            del lambda_all_k, mu_all_k, lambda_l_term_all_k, mu_u_term_all_k
-            del constant_score_part_all_k, pi_h_bar_term_all_k, h_bar_gpu, Cx_gpu, x_gpu
+                    # --- Step 2 (Batch): Compute Total Score and Select Best k* ---
+                    # constant_score_part_all_k has shape (num_pi,). Broadcasting adds it to each row.
+                    # scores_batch shape: (current_batch_size, num_pi)
+                    torch.add(stochastic_score_part_batch, constant_score_part_all_k, out=scores_batch)
+                    # argmax along dim=1 to find best pi_k for each scenario (row)
+                    torch.max(scores_batch, dim=1, out=(best_k_scores_batch, best_k_index_batch))
 
-            # --- Calculate final averages ---
-            Avg_Pi = total_selected_pi_sum / self.num_scenarios
-            Avg_Lambda = total_selected_lambda_sum / self.num_scenarios
-            Avg_Mu = total_selected_mu_sum / self.num_scenarios
-            Avg_S = total_s_sum / self.num_scenarios
+                    all_best_k_indices[start_scenario_idx:end_scenario_idx] = best_k_index_batch.to(torch.int32)
+                    all_best_k_scores[start_scenario_idx:end_scenario_idx] = best_k_scores_batch
 
-            # --- Step 5: Final Coefficient Calculation (float64) ---
-            beta_gpu = -torch.matmul(self.C_gpu_fp64_transpose, Avg_Pi)
+                    # --- Step 3 (Batch): Compute s_i = short_pi_k*^T * short_delta_r_i for the best k* ---
+                    # Need to select the scores from stochastic_score_part_batch that correspond to the best_k_index_batch
+                    # Indexing into stochastic_score_part_batch (current_batch_size, num_pi)
+                    s_gpu_batch[:] = stochastic_score_part_batch[batch_indices_for_s, best_k_index_batch]
 
-            r_bar_gpu_fp64 = self.r_bar_gpu.to(torch.float64)
-            lb_gpu_fp64 = self.lb_gpu.to(torch.float64)
-            ub_gpu_fp64 = self.ub_gpu.to(torch.float64)
+                    # --- Step 4 (Batch): Accumulate Results using float64 ---
+                    selected_pi_batch[:] = active_pi_gpu[best_k_index_batch]
+                    selected_lambda_batch[:] = lambda_all_k[best_k_index_batch] 
+                    selected_mu_batch[:] = mu_all_k[best_k_index_batch]     
 
-            alpha_pi_term = torch.dot(Avg_Pi, r_bar_gpu_fp64) + Avg_S 
-            alpha_lambda_term = torch.dot(Avg_Lambda, lb_gpu_fp64)
-            alpha_mu_term = torch.dot(Avg_Mu, ub_gpu_fp64)
+                    total_selected_pi_sum += torch.sum(selected_pi_batch, dim=0, dtype=torch.float64)
+                    total_selected_lambda_sum += torch.sum(selected_lambda_batch, dim=0, dtype=torch.float64)
+                    total_selected_mu_sum += torch.sum(selected_mu_batch, dim=0, dtype=torch.float64)
+                    total_s_sum += torch.sum(s_gpu_batch, dtype=torch.float64)
 
-            alpha_gpu = alpha_pi_term - alpha_lambda_term + alpha_mu_term
+                # --- Calculate final averages ---
+                Avg_Pi = total_selected_pi_sum / self.num_scenarios
+                Avg_Lambda = total_selected_lambda_sum / self.num_scenarios
+                Avg_Mu = total_selected_mu_sum / self.num_scenarios
+                Avg_S = total_s_sum / self.num_scenarios
 
-            # --- Return results (transfer to CPU as NumPy arrays) ---
-            alpha = alpha_gpu.item()
-            beta = beta_gpu.cpu().numpy()
-            best_k_index_cpu = all_best_k_indices.cpu().numpy()
-            best_k_scores_cpu = all_best_k_scores.cpu().numpy()
+                # --- Step 5: Final Coefficient Calculation (float64) ---
+                beta_gpu = -torch.matmul(self.C_gpu_fp64_transpose, Avg_Pi)
 
-            # print(f"[{time.strftime('%H:%M:%S')}] Cut calculation finished.")
-            if self.device.type == 'cuda':
-                try:
-                    allocated_mem_gb = torch.cuda.memory_allocated(self.device) / 1024**3
-                    reserved_mem_gb = torch.cuda.memory_reserved(self.device) / 1024**3
-            #         print(f"    Device VRAM allocated: {allocated_mem_gb:.2f} GB")
-                    print(f"    Device VRAM reserved:  {reserved_mem_gb:.2f} GB")
-                except Exception as e:
-                    print(f"    Could not get CUDA memory info: {e}")
+                r_bar_gpu_fp64 = self.r_bar_gpu.to(torch.float64)
+                lb_gpu_fp64 = self.lb_gpu.to(torch.float64)
+                ub_gpu_fp64 = self.ub_gpu.to(torch.float64)
 
-            return alpha, beta, best_k_scores_cpu, best_k_index_cpu
+                alpha_pi_term = torch.dot(Avg_Pi, r_bar_gpu_fp64) + Avg_S 
+                alpha_lambda_term = torch.dot(Avg_Lambda, lb_gpu_fp64)
+                alpha_mu_term = torch.dot(Avg_Mu, ub_gpu_fp64)
+
+                alpha_gpu = alpha_pi_term - alpha_lambda_term + alpha_mu_term
+
+                # --- Prepare results (transfer to CPU as NumPy arrays) ---
+                alpha = alpha_gpu.item()
+                beta = beta_gpu.cpu().numpy()
+                best_k_index_cpu = all_best_k_indices.cpu().numpy()
+                best_k_scores_cpu = all_best_k_scores.cpu().numpy()
+
+            finally:
+                # --- Explicit buffer cleanup ---
+                tensors_to_delete = [
+                    stochastic_score_part_buffer, scores_buffer, best_k_scores_buffer,
+                    best_k_index_buffer, batch_indices_buffer, s_gpu_buffer,
+                    selected_pi_buffer, selected_lambda_buffer, selected_mu_buffer,
+                    lambda_all_k, mu_all_k, lambda_l_term_all_k, mu_u_term_all_k,
+                    constant_score_part_all_k, pi_h_bar_term_all_k, h_bar_gpu, Cx_gpu, x_gpu
+                ]
+                
+                for tensor in tensors_to_delete:
+                    if tensor is not None:
+                        del tensor
+                
+                # --- VRAM monitoring and cleanup ---
+                if self.device.type == 'cuda':
+                    try:
+                        peak_mem = torch.cuda.max_memory_allocated(self.device) / 1024**3
+                        final_mem = torch.cuda.memory_allocated(self.device) / 1024**3
+                        reserved_mem = torch.cuda.memory_reserved(self.device) / 1024**3
+                        
+                        print(f"    Peak VRAM during calculation: {peak_mem:.2f} GB")
+                        print(f"    Final VRAM allocated: {final_mem:.2f} GB")
+                        print(f"    VRAM reserved: {reserved_mem:.2f} GB")
+                        
+                        # Optional: Force cache cleanup
+                        torch.cuda.empty_cache()
+                    except Exception as e:
+                        print(f"    Could not get CUDA memory info: {e}")
+
+        return alpha, beta, best_k_scores_cpu, best_k_index_cpu
 
     # --- Retrieval Methods ---
     def get_basis(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

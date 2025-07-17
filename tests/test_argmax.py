@@ -102,9 +102,6 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
 
         # --- Initialize and populate the ArgmaxOperation object ---
         print("Initializing and populating ArgmaxOperation...")
-        # Get the variations delta_r from the stochastic parts
-        short_delta_r = cls.reader.get_short_delta_r(stochastic_rhs_parts)
-
         # Define capacities (example: allow some buffer)
         max_pi_capacity = 1000
         max_scenario_capacity = 10000
@@ -113,13 +110,16 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
             cls.reader, max_pi_capacity, max_scenario_capacity, device='cpu'
         )
 
+        # Get the variations delta_r from the stochastic parts
+        short_delta_r = cls.reader.get_short_delta_r(stochastic_rhs_parts)
+
         # Add dual solutions (pi) and basis information from HDF5 results
         for s in range(cls.num_scenarios):
             # Assuming add_pi doesn't need basis_x info here, passing empty array
             cls.argmax_op.add_pi(pi_s[s, :], np.array([]), vbasis_y_all[s, :], cbasis_y_all[s, :])
 
         # Add scenario data (delta_r)
-            cls.argmax_op.add_scenarios(short_delta_r)
+        cls.argmax_op.add_scenarios(short_delta_r)
 
         print(f"ArgmaxOperation populated. Num Pi: {cls.argmax_op.num_pi}, Num Scenarios: {cls.argmax_op.num_scenarios}")
         print("Setup complete.")
