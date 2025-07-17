@@ -158,6 +158,54 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
         )
         print(f"Assertion PASSED: Estimated objective matches expected objective within tolerance {tolerance}.")
 
+    def test_d_matrix_parsing_and_storage(self):
+        """
+        Verify that the D matrix is correctly parsed from SMPSReader and stored in ArgmaxOperation.
+        """
+        print("\nRunning test: D matrix parsing and storage...")
+        
+        # Pre-conditions check
+        self.assertIsNotNone(self.reader, "SMPSReader object not initialized.")
+        self.assertIsNotNone(self.argmax_op, "ArgmaxOperation object not initialized.")
+        
+        # Check that SMPSReader loaded the D matrix
+        self.assertIsNotNone(self.reader.D, "SMPSReader did not load matrix D.")
+        print(f"  SMPSReader D matrix shape: {self.reader.D.shape}")
+        print(f"  SMPSReader D matrix nnz: {self.reader.D.nnz}")
+        
+        # Check that ArgmaxOperation stored the D matrix
+        self.assertIsNotNone(self.argmax_op.D, "ArgmaxOperation did not store matrix D.")
+        print(f"  ArgmaxOperation D matrix shape: {self.argmax_op.D.shape}")
+        print(f"  ArgmaxOperation D matrix nnz: {self.argmax_op.D.nnz}")
+        
+        # Verify shapes match
+        self.assertEqual(self.reader.D.shape, self.argmax_op.D.shape, 
+                        f"D matrix shape mismatch: reader {self.reader.D.shape} vs argmax_op {self.argmax_op.D.shape}")
+        
+        # Verify nnz matches
+        self.assertEqual(self.reader.D.nnz, self.argmax_op.D.nnz,
+                        f"D matrix nnz mismatch: reader {self.reader.D.nnz} vs argmax_op {self.argmax_op.D.nnz}")
+        
+        # Verify matrix data is identical
+        diff_matrix = self.reader.D - self.argmax_op.D
+        self.assertEqual(diff_matrix.nnz, 0, "D matrix data differs between reader and argmax_op")
+        
+        # Verify expected dimensions based on problem structure
+        expected_rows = len(self.reader.row2_indices)  # Stage 2 constraints
+        expected_cols = len(self.reader.y_indices)     # Stage 2 variables
+        self.assertEqual(self.reader.D.shape, (expected_rows, expected_cols),
+                        f"D matrix shape {self.reader.D.shape} doesn't match expected ({expected_rows}, {expected_cols})")
+        
+        print("  All D matrix checks PASSED!")
+        
+        # Show some sample entries from D matrix
+        if self.reader.D.nnz > 0:
+            D_coo = self.reader.D.tocoo()
+            print(f"  Sample D matrix entries:")
+            for i in range(min(3, D_coo.nnz)):
+                row, col, val = D_coo.row[i], D_coo.col[i], D_coo.data[i]
+                print(f"    D[{row},{col}] = {val}")
+
 # --- Standard boilerplate to run tests ---
 if __name__ == '__main__':
     unittest.main()

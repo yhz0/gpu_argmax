@@ -34,6 +34,7 @@ class ArgmaxOperation:
                  r_sparse_indices: np.ndarray,
                  r_bar: np.ndarray,
                  C: scipy.sparse.spmatrix,
+                 D: scipy.sparse.spmatrix,
                  lb_y_bounded: np.ndarray,
                  ub_y_bounded: np.ndarray,
                  scenario_batch_size: int = 10000,
@@ -51,6 +52,7 @@ class ArgmaxOperation:
             r_sparse_indices: 1D np.ndarray of indices where stage 2 RHS is stochastic.
             r_bar: 1D np.ndarray for the fixed part of stage 2 RHS.
             C: SciPy sparse matrix (stage 2 rows x X_DIM).
+            D: SciPy sparse matrix (stage 2 rows x NUM_STAGE2_VARS).
             lb_y_bounded: 1D np.ndarray of lower bounds for bounded variables.
             ub_y_bounded: 1D np.ndarray of upper bounds for bounded variables.
             scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
@@ -79,6 +81,9 @@ class ArgmaxOperation:
         if np.any(r_sparse_indices < 0) or np.any(r_sparse_indices >= NUM_STAGE2_ROWS): raise ValueError("r_sparse_indices out of bounds.")
         if not scipy.sparse.issparse(C): raise TypeError("C must be a SciPy sparse matrix.")
         if not isinstance(scenario_batch_size, int) or scenario_batch_size <= 0: raise ValueError("scenario_batch_size must be positive.")
+
+        # --- Store D matrix on CPU ---
+        self.D = D
 
         # --- Dimensions and Capacities ---
         self.NUM_STAGE2_ROWS = NUM_STAGE2_ROWS
@@ -167,6 +172,8 @@ class ArgmaxOperation:
             raise ValueError("SMPSReader data must be loaded using load_and_extract() before creating ArgmaxOperation.")
         if reader.C is None:
              raise ValueError("SMPSReader did not load matrix C (stage 2 technology matrix).")
+        if reader.D is None:
+             raise ValueError("SMPSReader did not load matrix D (stage 2 recourse matrix).")
         
         # --- Extract parameters from reader ---
         NUM_STAGE2_ROWS = len(reader.row2_indices)
@@ -175,6 +182,7 @@ class ArgmaxOperation:
         r_sparse_indices = reader.stochastic_rows_relative_indices
         r_bar = reader.r_bar
         C = reader.C
+        D = reader.D
 
         # Calculate bounded variable info
         if NUM_STAGE2_VARS > 0 and reader.lb_y is not None and reader.ub_y is not None:
@@ -200,6 +208,7 @@ class ArgmaxOperation:
             r_sparse_indices=r_sparse_indices,
             r_bar=r_bar,
             C=C,
+            D=D,
             lb_y_bounded=lb_y_bounded,
             ub_y_bounded=ub_y_bounded,
             scenario_batch_size=scenario_batch_size,
