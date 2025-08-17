@@ -27,30 +27,49 @@ We know that $\lambda_j = \max(0, RC_j)$ and $\mu_j = \max(0, -RC_j)$, where $RC
 
 The `ArgmaxOperation` class stores a set of candidate dual solutions obtained from previous iterations or subproblem solves. In the current design, each stored solution `k` consists of the constraint duals $\pi_k$ and the reduced costs $RC_k$. From $RC_k$, we can derive the corresponding bound duals $\lambda_k$ and $\mu_k$.
 
-### 3. The "Score" Calculation
+### 3. The Refactored API: A Two-Step Process
 
-The `calculate_cut` method processes scenarios ($\omega$) in batches. For each scenario $\omega_i$ in a batch and each stored candidate dual solution $k$, it calculates a "score". Let's look at the components:
+The calculation of Benders cuts has been refactored into a two-step process to separate the computationally intensive search for the best duals from the final coefficient calculation.
 
-* $h(\omega_i, x) = r(\omega_i) - Cx$ is calculated (this uses $\bar{r}$ and the scenario-specific $\delta_r(\omega_i)$).
-* The code pre-calculates $\lambda_k = \max(0, RC_k)$ and $\mu_k = \max(0, -RC_k)$ for all stored $k$.
-* It pre-calculates the bound terms $\lambda_k^T l$ and $\mu_k^T u$ for all $k$.
-* It calculates the $\pi^T h$ term: `pi_h_term = active_pi_gpu @ h_gpu_batch`.
-* It combines these to get the score:
-    `scores_batch = pi_h_term - lambda_l_term_all_k[:, cp.newaxis] + mu_u_term_all_k[:, cp.newaxis]`
+#### Step 1: `find_best_k(x)` - Finding the Best Dual Solution
 
-This `scores_batch[k, i]` value is precisely the **objective function value of the dual problem** evaluated at the candidate dual solution $(\pi_k, \lambda_k, \mu_k)$ for the specific scenario $\omega_i$ and the given first-stage solution $x$.
+The `find_best_k(x)` method is the core of the operation. For a given first-stage decision vector `x`, it calculates a "score" for each scenario $\omega_i$ and each stored candidate dual solution `k`. This score is the objective function value of the dual problem:
 
 `Score(k, i) = \pi_k^T (r(\omega_i) - Cx) - \lambda_k^T l + \mu_k^T u`
 
-### 4. The `argmax` Operation
+The method then performs an `argmax` operation for each scenario to find the index `k*` of the dual solution that maximizes this score. The primary purpose of this step is:
 
-The line `best_k_index_batch = cp.argmax(scores_batch, axis=0)` finds, for each scenario $\omega_i$ in the batch, the index $k^*$ of the stored candidate dual solution $(\pi_{k^*}, RC_{k^*})$ that yields the **maximum dual objective value** among all stored candidates.
+*   **Finding the Tightest Bound:** By maximizing the dual objective over the set of stored candidates, we find the tightest possible lower bound on the true second-stage cost $Q(x, \omega_i)$ for each scenario.
+*   **Identifying the Most Relevant Cut:** The dual solution `k*` that maximizes the score is considered the most "active" or "relevant" for that specific scenario and first-stage decision.
 
-### 5. Purpose of Finding the Maximum Score
+The results of this operation (the best indices `k*` and the corresponding maximum scores) are stored internally on the GPU.
 
-* **Tightest Bound:** By LP duality (specifically weak duality), any feasible dual solution provides a lower bound on the true primal optimal value. Strong duality states the optimal dual objective equals the optimal primal objective ($Q(x, \omega)$). Therefore, maximizing the dual objective value over the *set of stored candidate duals* gives the tightest possible lower bound on $Q(x, \omega_i)$ that can be formed using the information currently available in the `ArgmaxOperation` instance.
-    $Q(x, \omega_i) \ge \max_{k} \{ \text{Score}(k, i) \}$
-* **Identifying Relevant Cut:** The dual solution $k^*$ that maximizes the score for a given $(x, \omega_i)$ is considered the "most active" or "most relevant" cut/dual information for that specific scenario instance.
-* **Constructing Benders Coefficients:** The subsequent steps in `calculate_cut` use the components ($\pi_{k^*}, \lambda_{k^*}, \mu_{k^*}$) corresponding to this `best_k_index` (averaged over all scenarios $\omega$) to construct the Benders cut coefficients $\alpha$ and $\beta$, which collectively form a valid lower approximation of $E[Q(x, \omega)]$.
+#### Step 2: `calculate_cut_coefficients()` - Aggregating Results
 
-In essence, the argmax calculation identifies which of the previously generated dual solutions (cuts) is most "binding" or provides the best approximation for each scenario given the current first-stage decision $x$.
+Once `find_best_k(x)` has been run, the `calculate_cut_coefficients()` method can be called. This method uses the stored `best_k_indices` to:
+
+1.  Gather the corresponding dual vectors ($\pi_{k^*}, \lambda_{k^*}, \mu_{k^*}$) for each scenario.
+2.  Calculate the average of these vectors across all scenarios.
+3.  Use these averaged vectors to compute the final Benders cut coefficients, `alpha` and `beta`.
+
+This separation ensures that the expensive `argmax` search is performed only once per `x` vector, and the final coefficients can be retrieved efficiently afterward.
+
+### 4. Usage Example
+
+The new API is used as follows:
+
+```python
+# Assume argmax_op is an initialized ArgmaxOperation instance
+# and x is the first-stage decision vector.
+
+# 1. Perform the expensive search for the best duals for each scenario.
+#    This stores the results internally.
+argmax_op.find_best_k(x)
+
+# 2. Calculate the final Benders cut coefficients based on the stored results.
+alpha, beta = argmax_op.calculate_cut_coefficients()
+
+# 3. (Optional) Retrieve the detailed results for analysis.
+scores, indices = argmax_op.get_best_k_results()
+```
+In essence, the `find_best_k` method identifies which of the previously generated dual solutions is most "binding" for each scenario, and `calculate_cut_coefficients` aggregates this information to form a single, valid Benders optimality cut.

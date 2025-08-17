@@ -90,42 +90,50 @@ def run_benchmark(N: int, M: int, DEVICE: str):
 
     print(f"[{time.strftime('%H:%M:%S')}] {argmax_op.num_pi} dual solutions added.")
 
-    # 5. Run and time the calculate_cut method
+    # 5. Run and time the new methods
     # ============================================
     # Generate a random first-stage decision vector 'x'
     x_dim = len(reader.x_indices) # 89 for ssn
     x_vector = np.random.rand(x_dim).astype(np.float32)
 
-    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of calculate_cut...")
-    
-    # For GPU timing, synchronize before starting to ensure all prep work is done
+    # --- Benchmark find_best_k ---
+    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of find_best_k...")
     if DEVICE == 'cuda':
         torch.cuda.synchronize()
-
-    start_time = time.perf_counter()
-
-    # The main operation to benchmark
-    result = argmax_op.calculate_cut(x_vector)
-
-    # Synchronize again to ensure the calculation is complete before stopping the timer
+    start_time_find = time.perf_counter()
+    
+    argmax_op.find_best_k(x_vector)
+    
     if DEVICE == 'cuda':
         torch.cuda.synchronize()
+    end_time_find = time.perf_counter()
+    elapsed_time_find_ms = (end_time_find - start_time_find) * 1000.0
+    print(f"[{time.strftime('%H:%M:%S')}] find_best_k benchmark finished.")
 
-    end_time = time.perf_counter()
+    # --- Benchmark calculate_cut_coefficients ---
+    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of calculate_cut_coefficients...")
+    if DEVICE == 'cuda':
+        torch.cuda.synchronize()
+    start_time_calc = time.perf_counter()
 
-    elapsed_time_ms = (end_time - start_time) * 1000.0
+    result = argmax_op.calculate_cut_coefficients()
 
-    print(f"[{time.strftime('%H:%M:%S')}] Benchmark finished.")
-    
+    if DEVICE == 'cuda':
+        torch.cuda.synchronize()
+    end_time_calc = time.perf_counter()
+    elapsed_time_calc_ms = (end_time_calc - start_time_calc) * 1000.0
+    print(f"[{time.strftime('%H:%M:%S')}] calculate_cut_coefficients benchmark finished.")
+
     # --- Final Result ---
     print("\n------------------------------------------")
     if result:
-        alpha, beta, _, _ = result
+        alpha, beta = result
         print("Cut calculation successful.")
         print(f"  alpha: {alpha:.6f}")
         print(f"  beta[0:5]: {beta[:5]}")
     else:
         print("Cut calculation failed.")
     
-    print(f"\nExecution time for calculate_cut: {elapsed_time_ms:.2f} ms")
+    print(f"\nExecution time for find_best_k: {elapsed_time_find_ms:.2f} ms")
+    print(f"Execution time for calculate_cut_coefficients: {elapsed_time_calc_ms:.2f} ms")
     print("------------------------------------------")

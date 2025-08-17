@@ -170,17 +170,19 @@ class BendersSolver:
             A tuple containing the estimated cost, scores, indices of best solutions, and execution time.
         """
         start_time = time.time()
-        cut_info = self.argmax_op.calculate_cut(current_x)
-        
+        self.argmax_op.find_best_k(current_x)
+        cut_info = self.argmax_op.calculate_cut_coefficients()
+
         if cut_info is None:
-            self.logger.info("ArgmaxOperation.calculate_cut returned None (e.g., MAX_PI=0 or no duals/scenarios). Argmax cost will be NaN.")
+            self.logger.warning("ArgmaxOperation.calculate_cut_coefficients returned None. Argmax cost will be NaN.")
             argmax_estim_q_x = np.nan
             best_k_scores = np.array([], dtype=float)
-            best_k_index = np.array([], dtype=int) # Ensure it's an array for get_basis
+            best_k_index = np.array([], dtype=int)
         else:
-            alpha_pre, beta_pre, best_k_scores, best_k_index = cut_info
-            argmax_estim_q_x = alpha_pre + beta_pre @ current_x 
-        
+            alpha_pre, beta_pre = cut_info
+            argmax_estim_q_x = alpha_pre + beta_pre @ current_x
+            best_k_scores, best_k_index = self.argmax_op.get_best_k_results()
+
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_scores, best_k_index, solve_time
 

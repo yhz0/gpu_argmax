@@ -128,7 +128,7 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
 
     def test_argmax_calculation_matches_expected_objective(self):
         """
-        Verify the objective from ArgmaxOperation.calculate_cut matches the reference value.
+        Verify the objective from the refactored methods matches the reference value.
         """
         # Pre-conditions check (ensure setUpClass succeeded)
         self.assertIsNotNone(self.argmax_op, "ArgmaxOperation object not initialized.")
@@ -136,9 +136,10 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
         self.assertIsNotNone(self.correct_scenario_objective, "Correct objective not calculated.")
 
         print("\nRunning test: Argmax calculation vs Expected objective...")
-        # --- Perform the core calculation using ArgmaxOperation ---
-        # calculate_cut likely returns alpha, beta, and maybe an index
-        alpha, beta, _, _ = self.argmax_op.calculate_cut(self.x_sol) # Ignore index if unused
+        # --- Perform the core calculation using the new two-step API ---
+        self.argmax_op.find_best_k(self.x_sol)
+        alpha, beta = self.argmax_op.calculate_cut_coefficients()
+        
         # Calculate the estimated objective value: alpha + beta^T * x
         estimated_objective = alpha + beta @ self.x_sol
 
