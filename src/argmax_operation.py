@@ -159,7 +159,7 @@ class ArgmaxOperation:
             size=C_csr32.shape, dtype=torch.float32, device=self.device
         )
 
-        self.check_optimality = check_optimality
+        self.check_optimality_enabled = check_optimality
 
         # Data requirements for optimality check
         # Let z = [y, s] where s is the slack variables s>=0
@@ -321,7 +321,7 @@ class ArgmaxOperation:
             self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
 
             # --- Offline Factorization for Optimality Checking ---
-            if self.check_optimality:
+            if self.check_optimality_enabled:
                 # 1. Construct the sparse basis matrix B
                 B = self._get_basis_matrix(new_vbasis, new_cbasis)
 
