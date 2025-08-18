@@ -28,6 +28,7 @@ class ArgmaxOperation:
     - Processes scenarios in batches for memory efficiency.
     - Uses double precision (float64) for key reduction steps for accuracy.
     - Handles sparse transfer matrix C (torch.sparse_csr_tensor).
+    - Configurable precision for optimality checking (`torch.float32` or `torch.float64`).
     """
 
     def __init__(self, NUM_STAGE2_ROWS: int, NUM_STAGE2_VARS: int,
@@ -42,7 +43,8 @@ class ArgmaxOperation:
                  scenario_batch_size: int = 10000,
                  device: Optional[Union[str, torch.device]] = None,
                  check_optimality: bool = False,
-                 device_factors: Optional[Union[str, torch.device]] = 'cpu'
+                 device_factors: Optional[Union[str, torch.device]] = 'cpu',
+                 optimality_dtype: torch.dtype = torch.float32
                  ):
         """
         Initializes the ArgmaxOperation class.
@@ -64,6 +66,9 @@ class ArgmaxOperation:
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
             check_optimality: Whether to check optimality of solutions. Defaults to False.
             device_factors: The device to store factors of basis matrices on, defaults to 'cpu'.
+            optimality_dtype: The torch.dtype for storing basis factors and related data
+                              for optimality checks. Defaults to torch.float32. Use
+                              torch.float64 for higher precision if needed.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
         start_time = time.time()
@@ -165,15 +170,15 @@ class ArgmaxOperation:
         # Let z = [y, s] where s is the slack variables s>=0
         if check_optimality:
             # LU Factors of B_j
-            self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
             # Pivots of B_j
             self.basis_pivots_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.int32, device=device_factors)
             # Basic Variable Lower Bounds of B_j
-            self.basis_lb_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            self.basis_lb_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
             # Basic Variable Upper Bounds of B_j
-            self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
             # Non-Basic Contribution of N_j . i.e. N@z_N
-            self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
             
 
         # --- Threading Lock ---
@@ -722,11 +727,12 @@ class ArgmaxOperation:
                 batch_delta_r_short = self.short_delta_r_gpu[start_idx:end_idx]
                 
                 # Reconstruct full delta_r for the batch
-                delta_r_batch = torch.zeros((batch_size, self.NUM_STAGE2_ROWS), dtype=torch.float32, device=self.device)
-                delta_r_batch.index_add_(1, self.r_sparse_indices_gpu, batch_delta_r_short)
+                optimality_dtype = expanded_factors.dtype
+                delta_r_batch = torch.zeros((batch_size, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)
+                delta_r_batch.index_add_(1, self.r_sparse_indices_gpu, batch_delta_r_short.to(optimality_dtype))
                 
                 # Assemble full RHS: v = h_bar + delta_r - N*z_N
-                rhs_batch = h_bar_gpu.unsqueeze(0) + delta_r_batch - expanded_non_basic_contrib
+                rhs_batch = h_bar_gpu.to(optimality_dtype).unsqueeze(0) + delta_r_batch - expanded_non_basic_contrib
                 
                 # Solve the batched systems: B*z_B = v  =>  LU*z_B = P*v
                 # Note: torch.linalg.lu_solve expects RHS to be (..., m, k)
