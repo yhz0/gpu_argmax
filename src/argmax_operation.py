@@ -33,6 +33,7 @@ class ArgmaxOperation:
                  X_DIM: int, MAX_PI: int, MAX_OMEGA: int,
                  r_sparse_indices: np.ndarray,
                  r_bar: np.ndarray,
+                 sense: np.ndarray,
                  C: scipy.sparse.spmatrix,
                  D: scipy.sparse.spmatrix,
                  lb_y: np.ndarray,
@@ -53,6 +54,7 @@ class ArgmaxOperation:
             MAX_OMEGA: Maximum number of scenarios to store.
             r_sparse_indices: 1D np.ndarray of indices where stage 2 RHS is stochastic.
             r_bar: 1D np.ndarray for the fixed part of stage 2 RHS.
+            sense: 1D np.ndarray of constraint senses.
             C: SciPy sparse matrix (stage 2 rows x X_DIM).
             D: SciPy sparse matrix (stage 2 rows x NUM_STAGE2_VARS).
             lb_y: 1D np.ndarray of lower bounds for all stage 2 variables.
@@ -74,6 +76,7 @@ class ArgmaxOperation:
 
         # --- Input Validation ---
         if r_bar.shape != (NUM_STAGE2_ROWS,): raise ValueError("r_bar shape mismatch.")
+        if sense.shape != (NUM_STAGE2_ROWS,): raise ValueError("sense shape mismatch.")
         if C.shape != (NUM_STAGE2_ROWS, X_DIM): raise ValueError("C matrix shape mismatch.")
         if lb_y.shape != (NUM_STAGE2_VARS,): raise ValueError("lb_y shape mismatch.")
         if ub_y.shape != (NUM_STAGE2_VARS,): raise ValueError("ub_y shape mismatch.")
@@ -90,6 +93,7 @@ class ArgmaxOperation:
         self.D = D
 
         # --- Dimensions and Capacities ---
+        self.sense = sense
         self.NUM_STAGE2_ROWS = NUM_STAGE2_ROWS
         self.NUM_STAGE2_VARS = NUM_STAGE2_VARS
         self.X_DIM = X_DIM
@@ -212,6 +216,7 @@ class ArgmaxOperation:
         X_DIM = len(reader.x_indices)
         r_sparse_indices = reader.stochastic_rows_relative_indices
         r_bar = reader.r_bar
+        sense = reader.sense2
         C = reader.C
         D = reader.D
         lb_y = reader.lb_y if reader.lb_y is not None else np.array([])
@@ -226,6 +231,7 @@ class ArgmaxOperation:
             MAX_OMEGA=MAX_OMEGA,
             r_sparse_indices=r_sparse_indices,
             r_bar=r_bar,
+            sense=sense,
             C=C,
             D=D,
             lb_y=lb_y,
