@@ -325,11 +325,19 @@ class ArgmaxOperation:
                 # 1. Construct the sparse basis matrix B
                 B = self._get_basis_matrix(new_vbasis, new_cbasis)
 
-                # 2. Factorize B and cache the LU factors and pivots
-                # Note: lu_factor requires a dense matrix
-                lu, piv = scipy.linalg.lu_factor(B.toarray(), check_finite=False)
-                self.basis_factors_cpu[idx].copy_(torch.from_numpy(lu))
-                self.basis_pivots_cpu[idx].copy_(torch.from_numpy(piv).to(torch.int32))
+                try:
+                    # 2. Factorize B and cache the LU factors and pivots
+                    # Note: lu_factor requires a dense matrix
+                    lu, piv = scipy.linalg.lu_factor(B.toarray(), check_finite=False)
+                    self.basis_factors_cpu[idx].copy_(torch.from_numpy(lu))
+                    self.basis_pivots_cpu[idx].copy_(torch.from_numpy(piv).to(torch.int32))
+                except scipy.linalg.LinAlgError:
+                    print(f"Warning: Singular basis matrix encountered for new solution {self.num_pi}. "
+                          "Marking factors with NaN to fail optimality checks.")
+                    # Mark with NaN so it never passes the optimality check
+                    self.basis_factors_cpu[idx].fill_(float('nan'))
+                    # Pivots can be zero, doesn't matter as NaN factors will propagate
+                    self.basis_pivots_cpu[idx].zero_()
 
                 # 3. Cache the bounds for the basic variables
                 lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
