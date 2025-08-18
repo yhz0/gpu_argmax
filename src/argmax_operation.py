@@ -199,7 +199,9 @@ class ArgmaxOperation:
                          MAX_PI: int, MAX_OMEGA: int,
                          scenario_batch_size: int = 10000,
                          device: Optional[Union[str, torch.device]] = None,
-                         check_optimality: bool = False) -> 'ArgmaxOperation':
+                         check_optimality: bool = False,
+                         device_factors: Optional[Union[str, torch.device]] = 'cpu',
+                         optimality_dtype: torch.dtype = torch.float32) -> 'ArgmaxOperation':
         """
         Factory method to create an ArgmaxOperation instance from an SMPSReader.
 
@@ -209,6 +211,9 @@ class ArgmaxOperation:
             MAX_OMEGA: Maximum number of scenarios to store.
             scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
+            check_optimality: Whether to check optimality of solutions. Defaults to False.
+            device_factors: The device to store factors of basis matrices on, defaults to 'cpu'.
+            optimality_dtype: The torch.dtype for storing basis factors. Defaults to torch.float32.
 
         Returns:
             An initialized ArgmaxOperation instance.
@@ -251,7 +256,9 @@ class ArgmaxOperation:
             ub_y=ub_y,
             scenario_batch_size=scenario_batch_size,
             device=device,
-            check_optimality=check_optimality
+            check_optimality=check_optimality,
+            device_factors=device_factors,
+            optimality_dtype=optimality_dtype
         )
 
 
@@ -574,6 +581,13 @@ class ArgmaxOperation:
             B = scipy.sparse.hstack([d_cols, slack_cols], format='csc')
         else:
             B = d_cols.tocsc()
+
+        # Check for degeneracy: the basis matrix must be square.
+        if B.shape[1] != self.NUM_STAGE2_ROWS:
+            raise ValueError(
+                f"Invalid basis: detected degeneracy. Basis matrix has shape {B.shape}, "
+                f"but expected {self.NUM_STAGE2_ROWS} columns (basic variables)."
+            )
 
         return B
 
