@@ -29,14 +29,14 @@ class ArgmaxOperation:
     - Handles sparse transfer matrix C (torch.sparse_csr_tensor).
     """
 
-    def __init__(self, NUM_STAGE2_ROWS: int, NUM_BOUNDED_VARS: int, NUM_STAGE2_VARS: int,
+    def __init__(self, NUM_STAGE2_ROWS: int, NUM_STAGE2_VARS: int,
                  X_DIM: int, MAX_PI: int, MAX_OMEGA: int,
                  r_sparse_indices: np.ndarray,
                  r_bar: np.ndarray,
                  C: scipy.sparse.spmatrix,
                  D: scipy.sparse.spmatrix,
-                 lb_y_bounded: np.ndarray,
-                 ub_y_bounded: np.ndarray,
+                 lb_y: np.ndarray,
+                 ub_y: np.ndarray,
                  scenario_batch_size: int = 10000,
                  device: Optional[Union[str, torch.device]] = None,
                  check_optimality: bool = False):
@@ -45,7 +45,6 @@ class ArgmaxOperation:
 
         Args:
             NUM_STAGE2_ROWS: Dimension of pi vector and stage 2 constraints.
-            NUM_BOUNDED_VARS: Dimension of rc vector (vars with non-trivial bounds).
             NUM_STAGE2_VARS: Dimension of vbasis vector (total stage 2 vars).
             X_DIM: Dimension of x vector (stage 1 vars).
             MAX_PI: Maximum number of (pi, RC, basis) tuples to store.
@@ -54,8 +53,8 @@ class ArgmaxOperation:
             r_bar: 1D np.ndarray for the fixed part of stage 2 RHS.
             C: SciPy sparse matrix (stage 2 rows x X_DIM).
             D: SciPy sparse matrix (stage 2 rows x NUM_STAGE2_VARS).
-            lb_y_bounded: 1D np.ndarray of lower bounds for bounded variables.
-            ub_y_bounded: 1D np.ndarray of upper bounds for bounded variables.
+            lb_y: 1D np.ndarray of lower bounds for all stage 2 variables.
+            ub_y: 1D np.ndarray of upper bounds for all stage 2 variables.
             scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
             check_optimality: Whether to check optimality of solutions. Defaults to False.
@@ -73,8 +72,8 @@ class ArgmaxOperation:
         # --- Input Validation ---
         if r_bar.shape != (NUM_STAGE2_ROWS,): raise ValueError("r_bar shape mismatch.")
         if C.shape != (NUM_STAGE2_ROWS, X_DIM): raise ValueError("C matrix shape mismatch.")
-        if lb_y_bounded.shape != (NUM_BOUNDED_VARS,): raise ValueError("lb_y_bounded shape mismatch.")
-        if ub_y_bounded.shape != (NUM_BOUNDED_VARS,): raise ValueError("ub_y_bounded shape mismatch.")
+        if lb_y.shape != (NUM_STAGE2_VARS,): raise ValueError("lb_y shape mismatch.")
+        if ub_y.shape != (NUM_STAGE2_VARS,): raise ValueError("ub_y shape mismatch.")
         if not isinstance(r_sparse_indices, np.ndarray) or r_sparse_indices.ndim != 1: raise ValueError("r_sparse_indices must be 1D.")
         unique_r_indices = np.unique(r_sparse_indices)
         if len(unique_r_indices) != len(r_sparse_indices):
@@ -89,7 +88,6 @@ class ArgmaxOperation:
 
         # --- Dimensions and Capacities ---
         self.NUM_STAGE2_ROWS = NUM_STAGE2_ROWS
-        self.NUM_BOUNDED_VARS = NUM_BOUNDED_VARS
         self.NUM_STAGE2_VARS = NUM_STAGE2_VARS
         self.X_DIM = X_DIM
         self.MAX_PI = MAX_PI
@@ -109,12 +107,22 @@ class ArgmaxOperation:
         self.cbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=basis_dtype_np)
         self.hashes = set() # For deduplication based on (vbasis, cbasis) pair
 
+        # --- Bounded Variable Calculation ---
+        self.lb_y_full = lb_y
+        self.ub_y_full = ub_y
+        has_finite_ub = np.isfinite(ub_y)
+        has_finite_lb = np.isfinite(lb_y) & (np.abs(lb_y) > 1e-9)
+        self.bounded_mask = has_finite_ub | has_finite_lb
+        lb_y_bounded = lb_y[self.bounded_mask]
+        ub_y_bounded = ub_y[self.bounded_mask]
+        self.NUM_BOUNDED_VARS = len(lb_y_bounded)
+
         # --- GPU (Device) Data Storage ---
         print(f"[{time.strftime('%H:%M:%S')}] Allocating memory on device {self.device}...")
         torch_dtype = torch.float32 # Default dtype for most device tensors
 
         self.pi_gpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch_dtype, device=self.device)
-        self.rc_gpu = torch.zeros((MAX_PI, NUM_BOUNDED_VARS), dtype=torch_dtype, device=self.device)
+        self.rc_gpu = torch.zeros((MAX_PI, self.NUM_BOUNDED_VARS), dtype=torch_dtype, device=self.device)
         self.short_pi_gpu = torch.zeros((MAX_PI, self.R_SPARSE_LEN), dtype=torch_dtype, device=self.device)
         self.lb_gpu = torch.from_numpy(lb_y_bounded).to(dtype=torch_dtype, device=self.device)
         self.ub_gpu = torch.from_numpy(ub_y_bounded).to(dtype=torch_dtype, device=self.device)
@@ -199,24 +207,12 @@ class ArgmaxOperation:
         r_bar = reader.r_bar
         C = reader.C
         D = reader.D
-
-        # Calculate bounded variable info
-        if NUM_STAGE2_VARS > 0 and reader.lb_y is not None and reader.ub_y is not None:
-            has_finite_ub = np.isfinite(reader.ub_y)
-            has_finite_lb = np.isfinite(reader.lb_y) & (np.abs(reader.lb_y) > 1e-9) # Non-zero LB
-            bounded_mask = has_finite_ub | has_finite_lb
-            lb_y_bounded = reader.lb_y[bounded_mask]
-            ub_y_bounded = reader.ub_y[bounded_mask]
-            NUM_BOUNDED_VARS = len(lb_y_bounded)
-        else:
-            lb_y_bounded = np.array([])
-            ub_y_bounded = np.array([])
-            NUM_BOUNDED_VARS = 0
+        lb_y = reader.lb_y if reader.lb_y is not None else np.array([])
+        ub_y = reader.ub_y if reader.ub_y is not None else np.array([])
 
         # --- Instantiate the class using the extracted parameters ---
         return cls(
             NUM_STAGE2_ROWS=NUM_STAGE2_ROWS,
-            NUM_BOUNDED_VARS=NUM_BOUNDED_VARS,
             NUM_STAGE2_VARS=NUM_STAGE2_VARS,
             X_DIM=X_DIM,
             MAX_PI=MAX_PI,
@@ -225,8 +221,8 @@ class ArgmaxOperation:
             r_bar=r_bar,
             C=C,
             D=D,
-            lb_y_bounded=lb_y_bounded,
-            ub_y_bounded=ub_y_bounded,
+            lb_y=lb_y,
+            ub_y=ub_y,
             scenario_batch_size=scenario_batch_size,
             device=device,
             check_optimality=check_optimality
