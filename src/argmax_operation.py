@@ -338,12 +338,17 @@ class ArgmaxOperation:
                 B = self._get_basis_matrix(new_vbasis, new_cbasis)
 
                 try:
-                    # 2. Factorize B and cache the LU factors and pivots
-                    # Note: lu_factor requires a dense matrix
-                    lu, piv = scipy.linalg.lu_factor(B.toarray(), check_finite=False)
-                    self.basis_factors_cpu[idx].copy_(torch.from_numpy(lu))
-                    self.basis_pivots_cpu[idx].copy_(torch.from_numpy(piv).to(torch.int32))
-                except scipy.linalg.LinAlgError:
+                    # 2. Factorize B and cache the LU factors and pivots using PyTorch
+                    B_dense_tensor = torch.from_numpy(B.toarray()).to(
+                        dtype=self.basis_factors_cpu.dtype,
+                        device=self.basis_factors_cpu.device
+                    )
+                    torch.linalg.lu_factor(
+                        B_dense_tensor,
+                        pivot=True,
+                        out=(self.basis_factors_cpu[idx], self.basis_pivots_cpu[idx])
+                    )
+                except torch.linalg.LinAlgError:
                     print(f"Warning: Singular basis matrix encountered for new solution {self.num_pi}. "
                           "Marking factors with NaN to fail optimality checks.")
                     # Mark with NaN so it never passes the optimality check
