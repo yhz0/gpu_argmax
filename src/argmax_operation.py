@@ -9,6 +9,7 @@ import threading
 import scipy.linalg
 import h5py
 import os
+from cachetools import LRUCache
 
 if TYPE_CHECKING:
     from smps_reader import SMPSReader
@@ -113,12 +114,15 @@ class ArgmaxOperation:
         self.num_pi = 0
         self.num_scenarios = 0
 
+        # --- LRU Replacement Mechanism ---
+        self.lru_manager = LRUCache(maxsize=MAX_PI) # Maps (vbasis, cbasis) pairs to their indices
+        self.index_to_hash_map = {}  # Maps index to basis hash for quick lookup
+
         # --- CPU Data Storage (Only Basis) ---
         print(f"[{time.strftime('%H:%M:%S')}] Allocating CPU memory for basis...")
         basis_dtype_np = np.int8 # Compact storage for basis status
         self.vbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_VARS), dtype=basis_dtype_np)
         self.cbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=basis_dtype_np)
-        self.hashes = set() # For deduplication based on (vbasis, cbasis) pair
 
         # --- Bounded Variable Calculation ---
         self.lb_y_full = lb_y
@@ -179,7 +183,6 @@ class ArgmaxOperation:
             self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
             # Non-Basic Contribution of N_j . i.e. N@z_N
             self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
-            
 
         # --- Threading Lock ---
         self._lock = threading.Lock()
@@ -261,6 +264,12 @@ class ArgmaxOperation:
             optimality_dtype=optimality_dtype
         )
 
+    def _hash_basis_pair(self, vbasis: np.ndarray, cbasis: np.ndarray) -> str:
+        basis_np_dtype = np.int8
+        vbasis = vbasis.astype(basis_np_dtype, copy=False)
+        cbasis = cbasis.astype(basis_np_dtype, copy=False)
+        combined = np.concatenate((vbasis, cbasis))
+        return hashlib.sha256(combined.tobytes()).hexdigest()
 
     def add_pi(self, new_pi: np.ndarray, new_rc: np.ndarray,
                new_vbasis: np.ndarray, new_cbasis: np.ndarray) -> bool:
@@ -293,26 +302,20 @@ class ArgmaxOperation:
 
         # --- Acquire Lock for Critical Section ---
         with self._lock:
-            # --- Critical Section Start ---
-            if self.num_pi >= self.MAX_PI:
-                # print(f"Warning: MAX_PI ({self.MAX_PI}) reached. Cannot add new solution.")
+            # Deduplication based on the (vbasis, cbasis) pair
+            current_hash = self._hash_basis_pair(new_vbasis, new_cbasis)
+            if current_hash in self.lru_manager:
+                # Touch the entry to mark it as recently used
+                _ = self.lru_manager[current_hash]
                 return False
 
-            # --- Deduplication based on the (vbasis, cbasis) pair ---
-            try:
-                # 1. Concatenate
-                combined_vbasis_cbasis = np.concatenate((np.ascontiguousarray(new_vbasis),
-                                                          np.ascontiguousarray(new_cbasis)))
-
-                current_hash = hashlib.sha256(combined_vbasis_cbasis.tobytes()).hexdigest()
-                if current_hash in self.hashes:
-                    # print("Debug: Duplicate (vbasis, cbasis) pair detected, not adding.")
-                    return False
-                self.hashes.add(current_hash)
-            except Exception as e:
-                print(f"Warning: Could not hash (vbasis, cbasis) pair for deduplication. Adding anyway. Error: {e}")
-
-            idx = self.num_pi
+            # Index determination
+            if len(self.lru_manager) >= self.MAX_PI:
+                lru_item = self.lru_manager.popitem()  # Remove the least recently used item
+                idx = lru_item[1]  # Get the index of the evicted item
+                del self.index_to_hash_map[idx]  # Remove from index map
+            else:
+                idx = len(self.lru_manager)
 
             # Store basis only on CPU
             self.vbasis_cpu[idx] = new_vbasis
@@ -365,9 +368,54 @@ class ArgmaxOperation:
                 non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
                 self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
 
-            self.num_pi += 1
+            # --- LRU bookkeeping ---
+            # Update LRU manager and index map
+            self.lru_manager[current_hash] = idx
+            self.index_to_hash_map[idx] = current_hash
+
+            # Keep track of the number of stored solutions
+            self.num_pi = len(self.lru_manager)  # Update the count of stored solutions
+
             # --- Critical Section End ---
             return True
+        
+    def update_lru_on_access(self, best_k_index: np.ndarray) -> None:
+        """
+        Updates the LRU cache based on the frequency of winning solutions.
+
+        This method processes the `best_k_index` array, which contains the index
+        of the winning dual solution for each scenario. It updates the LRU manager
+        by treating solutions that win more frequently as "more recently used."
+
+        The process is as follows:
+        1. Count the occurrences of each unique index in `best_k_index`.
+        2. Sort these unique indices in ascending order of their counts.
+        3. Iterate through the sorted indices and "touch" each one in the
+           LRU cache. By touching the most frequent winner last, it becomes
+           the most recently used item in the cache.
+
+        Args:
+            best_k_index: A 1-D numpy array of indices for the effective dual basis.
+        """
+        if best_k_index.size == 0:
+            return
+
+        # Get unique indices and their counts
+        unique_indices, counts = np.unique(best_k_index, return_counts=True)
+
+        # Pair indices with their counts and sort by count in ascending order
+        sorted_by_count = sorted(zip(unique_indices, counts), key=lambda item: item[1])
+
+        with self._lock:
+            # Touch items in the LRU cache in ascending order of frequency
+            for index, _ in sorted_by_count:
+                # The index must be converted to a Python int for dictionary key lookup
+                py_index = int(index)
+                if py_index in self.index_to_hash_map:
+                    basis_hash = self.index_to_hash_map[py_index]
+                    # Accessing the item marks it as recently used
+                    _ = self.lru_manager[basis_hash]
+
 
     def add_scenarios(self, new_short_r_delta: np.ndarray) -> bool:
         """
