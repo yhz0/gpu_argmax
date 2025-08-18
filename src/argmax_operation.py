@@ -6,6 +6,7 @@ import time
 import math
 from typing import Tuple, Optional, Union, TYPE_CHECKING
 import threading
+import scipy.linalg
 import h5py
 import os
 
@@ -167,8 +168,10 @@ class ArgmaxOperation:
             self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
             # Pivots of B_j
             self.basis_pivots_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.int32, device=device_factors)
-            # Basic Variable Bounds of B_j
-            self.basis_bounds_cpu = torch.zeros((MAX_PI, 2, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            # Basic Variable Lower Bounds of B_j
+            self.basis_lb_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            # Basic Variable Upper Bounds of B_j
+            self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
             # Non-Basic Contribution of N_j . i.e. N@z_N
             self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
             
@@ -317,10 +320,25 @@ class ArgmaxOperation:
             self.rc_gpu[idx].copy_(torch.from_numpy(new_rc), non_blocking=is_cuda)
             self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
 
-            # TODO: Implement check_optimality logic: factorize the basis matrix corresponding to (vbasis, cbasis)
+            # --- Offline Factorization for Optimality Checking ---
             if self.check_optimality:
-                # Placeholder for optimality check logic
-                raise NotImplementedError
+                # 1. Construct the sparse basis matrix B
+                B = self._get_basis_matrix(new_vbasis, new_cbasis)
+
+                # 2. Factorize B and cache the LU factors and pivots
+                # Note: lu_factor requires a dense matrix
+                lu, piv = scipy.linalg.lu_factor(B.toarray(), check_finite=False)
+                self.basis_factors_cpu[idx].copy_(torch.from_numpy(lu))
+                self.basis_pivots_cpu[idx].copy_(torch.from_numpy(piv).to(torch.int32))
+
+                # 3. Cache the bounds for the basic variables
+                lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
+                self.basis_lb_cpu[idx].copy_(torch.from_numpy(lb_B))
+                self.basis_ub_cpu[idx].copy_(torch.from_numpy(ub_B))
+
+                # 4. Cache the contribution from non-basic variables (N @ z_N)
+                non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
+                self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
 
             self.num_pi += 1
             # --- Critical Section End ---
@@ -573,6 +591,46 @@ class ArgmaxOperation:
         ub_B = np.concatenate([ub_y_basic, ub_slacks])
 
         return lb_B, ub_B
+
+    def _get_non_basic_contribution(self, vbasis: np.ndarray) -> np.ndarray:
+        """
+        Calculates the contribution of non-basic variables (N @ z_N).
+
+        This is a key component for solving the primal system B @ z_B = h - N @ z_N,
+        where z_B are the basic variables and z_N are the non-basic variables
+        fixed at their bounds. This function pre-computes the `N @ z_N` term, which
+        is constant for a given basis.
+
+        Args:
+            vbasis: Variable basis status vector (-1 for non-basic at LB, -2 for UB).
+
+        Returns:
+            A NumPy array representing the vector N @ z_N.
+        """
+        # Identify non-basic variables and their values
+        non_basic_at_lb = np.where(vbasis == -1)[0]
+        non_basic_at_ub = np.where(vbasis == -2)[0]
+
+        # Initialize z_N with zeros. We only need to fill in the non-zero values.
+        z_N = np.zeros(self.NUM_STAGE2_VARS)
+        z_N[non_basic_at_lb] = self.lb_y_full[non_basic_at_lb]
+        z_N[non_basic_at_ub] = self.ub_y_full[non_basic_at_ub]
+        
+        # The contribution from non-basic slack variables is zero (they are at their lower bound of 0),
+        # so we only need to consider the columns of D corresponding to non-basic y-variables.
+        non_basic_indices = np.concatenate([non_basic_at_lb, non_basic_at_ub])
+        
+        if non_basic_indices.size > 0:
+            # Filter z_N to only include the values for non-basic variables
+            z_N_filtered = z_N[non_basic_indices]
+            # Select corresponding columns from D
+            N_filtered = self.D[:, non_basic_indices]
+            # Calculate N @ z_N contribution
+            non_basic_contribution = N_filtered @ z_N_filtered
+        else:
+            non_basic_contribution = np.zeros(self.NUM_STAGE2_ROWS)
+        
+        return non_basic_contribution
     
     def check_optimality(self, best_k_index, x):
         """
