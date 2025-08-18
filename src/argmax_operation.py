@@ -632,22 +632,110 @@ class ArgmaxOperation:
         
         return non_basic_contribution
     
-    def check_optimality(self, best_k_index, x):
+    def check_optimality(self, x: Optional[np.ndarray] = None, best_k_index: Optional[np.ndarray] = None, primal_feas_tol: float = 1e-5) -> np.ndarray:
         """
-        Checks the optimality conditions for the given solution vector x
-        against the best_k_index, on device.
+        Verifies primal feasibility for a given first-stage solution `x` and a set of bases.
 
-        It is assumed that the x evaluated is the same as the one used in find_best_k.
+        This method can operate in two modes:
+        1.  If `x` and `best_k_index` are not provided (default), it uses the results
+            from the last `find_best_k` call (`self.current_x_gpu` and `self.best_k_indices_gpu`).
+        2.  If `x` and/or `best_k_index` are provided, it uses the specified inputs,
+            overwriting the internal state for this check.
 
         Args:
-            best_k_index: The index of the best k solution to check, of shape (self.num_scenarios,)
-            x: The solution vector to evaluate at.   
+            x: Optional. The first-stage decision vector (NumPy array, shape X_DIM).
+            best_k_index: Optional. A 1D NumPy array of basis indices for each scenario.
+            primal_feas_tol: The tolerance for checking feasibility bounds.
 
         Returns:
-            A boolean array indicating whether each subproblem is optimal. (self.num_scenarios,)
+            A 1D NumPy boolean array indicating if each scenario's subproblem is optimal.
+
+        Raises:
+            ValueError: If optimality checking is disabled or inputs are invalid.
         """
-        # TODO: Implement optimality check
-        raise NotImplementedError
+        if not self.check_optimality_enabled:
+            raise ValueError("Optimality checking is not enabled. Initialize with check_optimality=True.")
+
+        with torch.no_grad():
+            # --- 1. Input Validation and State Update ---
+            if x is not None:
+                if x.shape != (self.X_DIM,):
+                    raise ValueError(f"Input x has incorrect shape. Expected ({self.X_DIM},), got {x.shape}.")
+                self.current_x_gpu.copy_(torch.from_numpy(x))
+
+            if best_k_index is not None:
+                if best_k_index.shape != (self.num_scenarios,):
+                    raise ValueError(f"Input best_k_index has incorrect shape. Expected ({self.num_scenarios},), got {best_k_index.shape}.")
+                if not np.all((best_k_index >= 0) & (best_k_index < self.num_pi)):
+                    raise ValueError("Input best_k_index contains invalid indices.")
+                self.best_k_indices_gpu[:self.num_scenarios].copy_(torch.from_numpy(best_k_index))
+
+            # --- 2. Scenario-Independent Pre-computation ---
+            h_bar_gpu = self.r_bar_gpu - torch.matmul(self.C_gpu, self.current_x_gpu)
+
+            all_results = []
+            num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
+
+            # --- 3. Batched Scenario Processing ---
+            for i in range(num_batches):
+                start_idx = i * self.scenario_batch_size
+                end_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
+                batch_size = end_idx - start_idx
+
+                # --- 4a. CPU-Side Data Aggregation ---
+                batch_indices_gpu = self.best_k_indices_gpu[start_idx:end_idx]
+                batch_indices_cpu = batch_indices_gpu.cpu()
+                
+                unique_indices, inverse_map = torch.unique(batch_indices_cpu, return_inverse=True)
+                
+                # Slice data from CPU cache using unique indices
+                factors_batch = self.basis_factors_cpu[unique_indices]
+                pivots_batch = self.basis_pivots_cpu[unique_indices]
+                lb_batch = self.basis_lb_cpu[unique_indices]
+                ub_batch = self.basis_ub_cpu[unique_indices]
+                non_basic_contrib_batch = self.non_basic_contribution_cpu[unique_indices]
+
+                # --- 4b. Data Transfer to GPU ---
+                factors_gpu = factors_batch.to(self.device)
+                pivots_gpu = pivots_batch.to(self.device)
+                lb_gpu = lb_batch.to(self.device)
+                ub_gpu = ub_batch.to(self.device)
+                non_basic_contrib_gpu = non_basic_contrib_batch.to(self.device)
+                inverse_map_gpu = inverse_map.to(self.device)
+
+                # Expand the unique data to the full batch size on the GPU
+                expanded_factors = factors_gpu[inverse_map_gpu]
+                expanded_pivots = pivots_gpu[inverse_map_gpu]
+                expanded_lb = lb_gpu[inverse_map_gpu]
+                expanded_ub = ub_gpu[inverse_map_gpu]
+                expanded_non_basic_contrib = non_basic_contrib_gpu[inverse_map_gpu]
+
+                # --- 4c. GPU-Side RHS Assembly and Solve ---
+                batch_delta_r_short = self.short_delta_r_gpu[start_idx:end_idx]
+                
+                # Reconstruct full delta_r for the batch
+                delta_r_batch = torch.zeros((batch_size, self.NUM_STAGE2_ROWS), dtype=torch.float32, device=self.device)
+                delta_r_batch.index_add_(1, self.r_sparse_indices_gpu, batch_delta_r_short)
+                
+                # Assemble full RHS: v = h_bar + delta_r - N*z_N
+                rhs_batch = h_bar_gpu.unsqueeze(0) + delta_r_batch - expanded_non_basic_contrib
+                
+                # Solve the batched systems: B*z_B = v  =>  LU*z_B = P*v
+                # Note: torch.linalg.lu_solve expects RHS to be (..., m, k)
+                solution_z_B = torch.linalg.lu_solve(expanded_factors, expanded_pivots, rhs_batch.unsqueeze(-1)).squeeze(-1)
+
+                # --- 4d. GPU-Side Verification ---
+                # Check if lb <= z_B <= ub within a tolerance
+                feasible = (solution_z_B >= expanded_lb - primal_feas_tol) & (solution_z_B <= expanded_ub + primal_feas_tol)
+                is_optimal_batch = torch.all(feasible, dim=1)
+                all_results.append(is_optimal_batch)
+
+            # --- 5. Finalization ---
+            if not all_results:
+                return np.array([], dtype=bool)
+                
+            final_results_gpu = torch.cat(all_results)
+            return final_results_gpu.cpu().numpy()
 
     # --- Retrieval Methods ---
     def get_basis(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
