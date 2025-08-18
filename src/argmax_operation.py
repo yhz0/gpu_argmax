@@ -39,7 +39,9 @@ class ArgmaxOperation:
                  ub_y: np.ndarray,
                  scenario_batch_size: int = 10000,
                  device: Optional[Union[str, torch.device]] = None,
-                 check_optimality: bool = False):
+                 check_optimality: bool = False,
+                 device_factors: Optional[Union[str, torch.device]] = 'cpu'
+                 ):
         """
         Initializes the ArgmaxOperation class.
 
@@ -58,6 +60,7 @@ class ArgmaxOperation:
             scenario_batch_size: Number of scenarios per GPU batch. Defaults to 10,000.
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
             check_optimality: Whether to check optimality of solutions. Defaults to False.
+            device_factors: The device to store factors of basis matrices on, defaults to 'cpu'.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
         start_time = time.time()
@@ -151,12 +154,15 @@ class ArgmaxOperation:
             size=C_csr32.shape, dtype=torch.float32, device=self.device
         )
 
-        # If check_optimality is enabled, store the factorized basis matrices
+        # If check_optimality is enabled, store the LU factor of basis matrices.
         # Basis matrices has shape (MAX_PI, NUM_STAGE2_VARS, NUM_STAGE2_VARS)
         # Column indices: the basic columns comes first and the slack variables follows
         self.check_optimality = check_optimality
         if check_optimality:
-            self.factorized_bases = torch.zeros((MAX_PI, NUM_STAGE2_VARS, NUM_STAGE2_VARS), dtype=torch.float32, device=self.device)
+            # TODO: Store the LU factor of basis matrices on device_factors
+            self.basis_lu_factors = ...
+            self.basis_pivots = ...
+            
 
         # --- Threading Lock ---
         self._lock = threading.Lock()
@@ -164,6 +170,7 @@ class ArgmaxOperation:
         # --- Placeholders for results from find_best_k ---
         self.best_k_indices_gpu = torch.zeros((MAX_OMEGA,), dtype=torch.long, device=self.device)
         self.best_k_scores_gpu = torch.zeros((MAX_OMEGA,), dtype=torch.float32, device=self.device)
+
         # Current candidate solution
         self.current_x_gpu = torch.zeros(X_DIM, dtype=torch.float32, device=self.device)
 
@@ -503,10 +510,30 @@ class ArgmaxOperation:
 
     def _get_basic_variable_bounds(self, vbasis, cbasis):
         """
-        Retrieves the bounds (lower and upper) for all basic variables specified for the given basis vectors.
-
+        Retrieves the lb and ub bounds for all basic variables specified for all basic variables specified by the basis (vbasis, cbasis).
+        The first variables in the basis correspond to the variable bounds, while the second set corresponds to the slack variable bounds.
+        
+        Returns:
+            A tuple (lb, ub) containing the lower and upper bounds for the basic variables. Each bound is a NumPy array of shape (NUM_STAGE2_VARS,)
         """
         # TODO: Implement bounds retrieval
+        raise NotImplementedError
+    
+    def check_optimality(self, best_k_index, x):
+        """
+        Checks the optimality conditions for the given solution vector x
+        against the best_k_index, on device.
+
+        It is assumed that the x evaluated is the same as the one used in find_best_k.
+
+        Args:
+            best_k_index: The index of the best k solution to check, of shape (self.num_scenarios,)
+            x: The solution vector to evaluate at.   
+
+        Returns:
+            A boolean array indicating whether each subproblem is optimal. (self.num_scenarios,)
+        """
+        # TODO: Implement optimality check
         raise NotImplementedError
 
     # --- Retrieval Methods ---
