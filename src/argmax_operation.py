@@ -54,7 +54,7 @@ class ArgmaxOperation:
             MAX_OMEGA: Maximum number of scenarios to store.
             r_sparse_indices: 1D np.ndarray of indices where stage 2 RHS is stochastic.
             r_bar: 1D np.ndarray for the fixed part of stage 2 RHS.
-            sense: 1D np.ndarray of constraint senses.
+            sense: 1D np.ndarray of constraint senses. (e.g., '<', '=', '>') 
             C: SciPy sparse matrix (stage 2 rows x X_DIM).
             D: SciPy sparse matrix (stage 2 rows x NUM_STAGE2_VARS).
             lb_y: 1D np.ndarray of lower bounds for all stage 2 variables.
@@ -89,8 +89,8 @@ class ArgmaxOperation:
         if not scipy.sparse.issparse(C): raise TypeError("C must be a SciPy sparse matrix.")
         if not isinstance(scenario_batch_size, int) or scenario_batch_size <= 0: raise ValueError("scenario_batch_size must be positive.")
 
-        # --- Store D matrix on CPU ---
-        self.D = D
+        # --- Store D matrix on CPU in CSC format for efficient column slicing ---
+        self.D = D.tocsc()
 
         # --- Dimensions and Capacities ---
         self.sense = sense
@@ -158,14 +158,19 @@ class ArgmaxOperation:
             size=C_csr32.shape, dtype=torch.float32, device=self.device
         )
 
-        # If check_optimality is enabled, store the LU factor of basis matrices.
-        # Basis matrices has shape (MAX_PI, NUM_STAGE2_VARS, NUM_STAGE2_VARS)
-        # Column indices: the basic columns comes first and the slack variables follows
         self.check_optimality = check_optimality
+
+        # Data requirements for optimality check
+        # Let z = [y, s] where s is the slack variables s>=0
         if check_optimality:
-            # TODO: Store the LU factor of basis matrices on device_factors
-            self.basis_lu_factors = ...
-            self.basis_pivots = ...
+            # LU Factors of B_j
+            self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            # Pivots of B_j
+            self.basis_pivots_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.int32, device=device_factors)
+            # Basic Variable Bounds of B_j
+            self.basis_bounds_cpu = torch.zeros((MAX_PI, 2, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
+            # Non-Basic Contribution of N_j . i.e. N@z_N
+            self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.float32, device=device_factors)
             
 
         # --- Threading Lock ---
@@ -499,31 +504,75 @@ class ArgmaxOperation:
         return scores_np, indices_np
 
     # --- Basis Matrix Related Methods for Optimality Checking ---
-    def _get_basis_matrix(self, vbasis, cbasis):
+    def _get_basis_matrix(self, vbasis: np.ndarray, cbasis: np.ndarray) -> scipy.sparse.spmatrix:
         """
-        Retrieves the basis matrix (B) for a given pair of basis vectors.
-        The columns are ordered as basic variable (vbasis) first, then slack variables (cbasis).
+        Constructs the sparse basis matrix (B) for a given basis.
+        Columns are ordered: basic variables from D, then basic slack/surplus variables.
 
         Args:
-            vbasis: The variable basis vector.
-            cbasis: The constraint basis vector.
+            vbasis: Variable basis status vector (0=basic, -1=non-basic at LB, -2=non-basic at UB).
+            cbasis: Constraint basis status vector (0=basic, -1=non-basic).
 
         Returns:
-            The basis matrix (B) as a NumPy array, shape (NUM_STAGE2_VARS, NUM_STAGE2_VARS)
+            The basis matrix (B) as a SciPy CSC sparse matrix.
         """
-        # TODO: Implement basis matrix construction
-        raise NotImplementedError
+        # 1. Identify indices of basic variables and basic slack/surplus variables
+        # Gurobi basis status: 0 = basic.
+        basic_var_indices = np.where(vbasis == 0)[0]
+        basic_slack_indices = np.where(cbasis == 0)[0]
 
-    def _get_basic_variable_bounds(self, vbasis, cbasis):
+        # 2. Select corresponding columns from the D matrix
+        # This is efficient because self.D is in CSC format
+        d_cols = self.D[:, basic_var_indices]
+
+        # 3. Construct sparse columns for slack/surplus variables
+        num_slacks = len(basic_slack_indices)
+        if num_slacks > 0:
+            # Determine the sign based on constraint sense ('<' -> +1, '>' -> -1)
+            # Note: Gurobi sense characters are '<', '>', '='
+            sense_values = np.array([-1 if self.sense[j] == '>' else 1 for j in basic_slack_indices])
+            
+            # Create a COO matrix for the slack columns
+            # Row indices are the slack indices, col indices are 0 to num_slacks-1
+            slack_cols = scipy.sparse.coo_matrix(
+                (sense_values, (basic_slack_indices, np.arange(num_slacks))),
+                shape=(self.NUM_STAGE2_ROWS, num_slacks)
+            ).tocsc()
+
+            # 4. Assemble B by horizontally stacking the columns
+            B = scipy.sparse.hstack([d_cols, slack_cols], format='csc')
+        else:
+            B = d_cols.tocsc()
+
+        return B
+
+    def _get_basic_variable_bounds(self, vbasis: np.ndarray, cbasis: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Retrieves the lb and ub bounds for all basic variables specified for all basic variables specified by the basis (vbasis, cbasis).
-        The first variables in the basis correspond to the variable bounds, while the second set corresponds to the slack variable bounds.
-        
+        Retrieves the lower and upper bounds for all basic variables specified by the basis.
+        The order matches the columns in the basis matrix from _get_basis_matrix.
+
+        Args:
+            vbasis: Variable basis status vector (0=basic, -1=non-basic at LB, -2=non-basic at UB).
+            cbasis: Constraint basis status vector (0=basic, -1=non-basic).
+
         Returns:
-            A tuple (lb, ub) containing the lower and upper bounds for the basic variables. Each bound is a NumPy array of shape (NUM_STAGE2_VARS,)
+            A tuple (lb_B, ub_B) of NumPy arrays for the lower and upper bounds.
         """
-        # TODO: Implement bounds retrieval
-        raise NotImplementedError
+        # 1. Get bounds for basic y variables
+        basic_var_indices = np.where(vbasis == 0)[0]
+        lb_y_basic = self.lb_y_full[basic_var_indices]
+        ub_y_basic = self.ub_y_full[basic_var_indices]
+
+        # 2. Get bounds for basic slack/surplus variables (always [0, inf))
+        num_basic_slacks = np.count_nonzero(cbasis == 0)
+        lb_slacks = np.zeros(num_basic_slacks)
+        ub_slacks = np.full(num_basic_slacks, np.inf)
+
+        # 3. Concatenate the bounds, maintaining the correct order
+        lb_B = np.concatenate([lb_y_basic, lb_slacks])
+        ub_B = np.concatenate([ub_y_basic, ub_slacks])
+
+        return lb_B, ub_B
     
     def check_optimality(self, best_k_index, x):
         """
