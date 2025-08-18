@@ -146,6 +146,7 @@ class ArgmaxOperation:
         # If check_optimality is enabled, store the factorized basis matrices
         # Basis matrices has shape (MAX_PI, NUM_STAGE2_VARS, NUM_STAGE2_VARS)
         # Column indices: the basic columns comes first and the slack variables follows
+        self.check_optimality = check_optimality
         if check_optimality:
             self.factorized_bases = torch.zeros((MAX_PI, NUM_STAGE2_VARS, NUM_STAGE2_VARS), dtype=torch.float32, device=self.device)
 
@@ -165,7 +166,8 @@ class ArgmaxOperation:
     def from_smps_reader(cls, reader: 'SMPSReader',
                          MAX_PI: int, MAX_OMEGA: int,
                          scenario_batch_size: int = 10000,
-                         device: Optional[Union[str, torch.device]] = None) -> 'ArgmaxOperation':
+                         device: Optional[Union[str, torch.device]] = None,
+                         check_optimality: bool = False) -> 'ArgmaxOperation':
         """
         Factory method to create an ArgmaxOperation instance from an SMPSReader.
 
@@ -226,7 +228,8 @@ class ArgmaxOperation:
             lb_y_bounded=lb_y_bounded,
             ub_y_bounded=ub_y_bounded,
             scenario_batch_size=scenario_batch_size,
-            device=device
+            device=device,
+            check_optimality=check_optimality
         )
 
 
@@ -299,6 +302,11 @@ class ArgmaxOperation:
             self.pi_gpu[idx].copy_(torch.from_numpy(new_pi), non_blocking=is_cuda)
             self.rc_gpu[idx].copy_(torch.from_numpy(new_rc), non_blocking=is_cuda)
             self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
+
+            # TODO: Implement check_optimality logic: factorize the basis matrix corresponding to (vbasis, cbasis)
+            if self.check_optimality:
+                # Placeholder for optimality check logic
+                raise NotImplementedError
 
             self.num_pi += 1
             # --- Critical Section End ---
@@ -480,6 +488,30 @@ class ArgmaxOperation:
         indices_np = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
         
         return scores_np, indices_np
+
+    # --- Basis Matrix Related Methods for Optimality Checking ---
+    def _get_basis_matrix(self, vbasis, cbasis):
+        """
+        Retrieves the basis matrix (B) for a given pair of basis vectors.
+        The columns are ordered as basic variable (vbasis) first, then slack variables (cbasis).
+
+        Args:
+            vbasis: The variable basis vector.
+            cbasis: The constraint basis vector.
+
+        Returns:
+            The basis matrix (B) as a NumPy array, shape (NUM_STAGE2_VARS, NUM_STAGE2_VARS)
+        """
+        # TODO: Implement basis matrix construction
+        raise NotImplementedError
+
+    def _get_basic_variable_bounds(self, vbasis, cbasis):
+        """
+        Retrieves the bounds (lower and upper) for all basic variables specified for the given basis vectors.
+
+        """
+        # TODO: Implement bounds retrieval
+        raise NotImplementedError
 
     # --- Retrieval Methods ---
     def get_basis(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
