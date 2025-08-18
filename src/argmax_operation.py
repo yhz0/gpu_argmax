@@ -459,7 +459,7 @@ class ArgmaxOperation:
         self.num_scenarios += num_to_add
         return True
 
-    def find_best_k(self, x: np.ndarray) -> None:
+    def find_best_k(self, x: np.ndarray, touch_lru: bool = True) -> None:
         """
         Finds the best dual solution (pi_k, rc_k) for each scenario based on
         maximizing the dual objective for a given first-stage decision `x`.
@@ -467,6 +467,7 @@ class ArgmaxOperation:
 
         Args:
             x: The first-stage decision vector (NumPy array, size X_DIM).
+            touch_lru: Whether to touch the LRU cache for the accessed items.
         """
         if self.num_pi == 0:
             print("Error: No pi vectors stored. Cannot find best k.")
@@ -513,6 +514,11 @@ class ArgmaxOperation:
 
                 self.best_k_scores_gpu[start_idx:end_idx] = best_k_scores_batch
                 self.best_k_indices_gpu[start_idx:end_idx] = best_k_index_batch
+
+        if touch_lru:
+            # Retrieve the winning indices and update the LRU cache
+            best_k_indices_cpu = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
+            self.update_lru_on_access(best_k_indices_cpu)
 
     def calculate_cut_coefficients(self) -> Optional[Tuple[float, np.ndarray]]:
         """
