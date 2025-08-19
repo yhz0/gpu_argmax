@@ -68,7 +68,8 @@ class BendersSolver:
             reader=self.reader,
             MAX_PI=self.config['MAX_PI'],
             MAX_OMEGA=self.config['MAX_OMEGA'],
-            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE']
+            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE'],
+            check_optimality=True
         )
         self.logger.info("ArgmaxOperation initialized.")
 
@@ -159,18 +160,28 @@ class BendersSolver:
         solve_time = time.time() - start_time
         return x_next, master_total_obj_val, status_code, solve_time
 
-    def _perform_argmax_operation(self, current_x: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray, float]:
+    def _perform_argmax_operation(self, current_x: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, float]:
         """
-        Performs the argmax operation to calculate the estimated cost and select the best dual solutions.
+        Performs the argmax operation to calculate the estimated cost, select the best dual solutions,
+        and check for primal feasibility (optimality).
 
         Args:
             current_x: The current first-stage decision vector.
 
         Returns:
-            A tuple containing the estimated cost, scores, indices of best solutions, and execution time.
+            A tuple containing:
+            - argmax_estim_q_x (float): The estimated cost from the argmax operation.
+            - best_k_scores (np.ndarray): The scores of the best dual for each scenario.
+            - best_k_index (np.ndarray): The indices of the best dual for each scenario.
+            - is_optimal (np.ndarray): A boolean array indicating if each scenario is optimal.
+            - solve_time (float): The execution time.
         """
         start_time = time.time()
         self.argmax_op.find_best_k(current_x)
+        
+        # Perform the optimality check using the results from find_best_k
+        PRIMAL_FEAS_TOL = self.config.get('primal_feas_tol', 1e-2)
+        is_optimal = self.argmax_op.check_optimality(current_x, primal_feas_tol=PRIMAL_FEAS_TOL)
         cut_info = self.argmax_op.calculate_cut_coefficients()
 
         if cut_info is None:
@@ -184,31 +195,27 @@ class BendersSolver:
             best_k_scores, best_k_index = self.argmax_op.get_best_k_results()
 
         solve_time = time.time() - start_time
-        return argmax_estim_q_x, best_k_scores, best_k_index, solve_time
+        return argmax_estim_q_x, best_k_scores, best_k_index, is_optimal, solve_time
 
-    def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray], subset_indices: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """
-        Solves a batch of subproblems in parallel using the current solution vector and optional basis information.
+        Solves a batch of subproblems in parallel, optionally for a subset of scenarios.
 
         Args:
             current_x (np.ndarray): The current solution vector for the master problem.
-            vbasis_batch (Optional[np.ndarray]): Optional batch of variable basis statuses for warm-starting the solver.
-            cbasis_batch (Optional[np.ndarray]): Optional batch of constraint basis statuses for warm-starting the solver.
+            vbasis_batch (Optional[np.ndarray]): Optional batch of variable basis statuses for warm-starting.
+            cbasis_batch (Optional[np.ndarray]): Optional batch of constraint basis statuses for warm-starting.
+            subset_indices (Optional[np.ndarray]): If provided, only solves subproblems for these indices.
 
         Returns:
-            Tuple[
-                np.ndarray,  # obj_all: Objective values for all subproblems.
-                np.ndarray,  # pi_all: Dual variables for all subproblems.
-                np.ndarray,  # rc_all: Reduced costs for all subproblems.
-                np.ndarray,  # vbasis_out: Output variable basis statuses after solving.
-                np.ndarray,  # cbasis_out: Output constraint basis statuses after solving.
-                np.ndarray,  # simplex_iter_count_all: Number of simplex iterations for each subproblem.
-                float        # solve_time: Total time taken to solve all subproblems.
-            ]
+            A tuple containing results for the solved scenarios.
         """
         start_time = time.time()
         obj_all, y_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all = \
-            self.parallel_worker.solve_batch(current_x, self.short_delta_r, vbasis_batch, cbasis_batch)
+            self.parallel_worker.solve_batch(
+                current_x, self.short_delta_r, vbasis_batch, cbasis_batch,
+                subset_indices=subset_indices
+            )
         solve_time = time.time() - start_time
         return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all, solve_time
 
@@ -268,35 +275,34 @@ class BendersSolver:
         update_time = time.time() - start_time
         return coverage_fraction, added_count, update_time
 
-    def _calculate_and_add_cut(self, current_x, pi_all_from_subproblems):
+    def _calculate_and_add_cut(self, current_x: np.ndarray, suboptimal_indices: Optional[np.ndarray], pi_suboptimal: Optional[np.ndarray], rc_suboptimal: Optional[np.ndarray]) -> Tuple[float, bool, float]:
         """
-        Calculates a new Benders cut and adds it to the master problem if it's violated.
+        Calculates a new Benders cut using argmax_op with overrides for suboptimal scenarios
+        and adds it to the master problem if violated.
 
         Args:
             current_x: The current first-stage decision vector.
-            pi_all_from_subproblems: All dual variables from the subproblems.
+            suboptimal_indices: Indices of scenarios that were solved via LP.
+            pi_suboptimal: Dual variables for the suboptimal scenarios.
+            rc_suboptimal: Reduced costs for the suboptimal scenarios.
 
         Returns:
             A tuple containing the actual cost, a boolean indicating if a cut was added, and the execution time.
         """
         start_time = time.time()
-        
-        if pi_all_from_subproblems.shape[0] == 0:
-            self.logger.warning("Cannot calculate cut, no duals from subproblems.")
+
+        # Use the argmax operation with overrides for the suboptimal scenarios
+        cut_info = self.argmax_op.calculate_cut_coefficients(
+            override_indices=suboptimal_indices,
+            override_pi=pi_suboptimal,
+            override_rc=rc_suboptimal
+        )
+
+        if cut_info is None:
+            self.logger.warning("Cannot calculate cut, argmax_op.calculate_cut_coefficients returned None.")
             return -np.inf, False, time.time() - start_time
 
-        mean_pi = np.mean(pi_all_from_subproblems, axis=0)
-        
-        # Ensure reader attributes are available
-        alpha_fixed_part = mean_pi @ self.reader.r_bar 
-        pattern = self.reader.stochastic_rows_relative_indices
-        short_pi_s = pi_all_from_subproblems[:, pattern]
-        alpha_variable_part_per_scenario = np.sum(short_pi_s * self.short_delta_r, axis=1)
-        alpha_variable_part_mean = np.mean(alpha_variable_part_per_scenario)
-        
-        alpha = alpha_fixed_part + alpha_variable_part_mean
-        beta = -mean_pi @ self.reader.C 
-
+        alpha, beta = cut_info
         subproblem_actual_q_x = alpha + beta @ current_x
 
         current_master_epigraph_eta_at_x = self.master_problem.calculate_epigraph_value(current_x)
@@ -340,6 +346,7 @@ class BendersSolver:
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
         log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
         log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")
+        log_parts.append(f"Optimal%: {log_metrics.get('optimal_fraction', 0) * 100:.2f}%")
         self.logger.info(" | ".join(log_parts))
 
     def run(self):
@@ -381,29 +388,37 @@ class BendersSolver:
                 self.logger.warning(f"Iteration {iter_count}: Perceived decrease is negative ({perceived_decrease:.4f}). Numerical issues may be present.")
                 perceived_decrease = 0.0
             
-            # 2. Warmstart: Calculate cut with existing duals in ArgmaxOperation
-            argmax_estim_q_x, best_k_scores, best_k_indices_for_basis, argmax_time = self._perform_argmax_operation(self.x_candidate)
-    
+            # 2. Perform Argmax Operation and Optimality Check
+            argmax_estim_q_x, best_k_scores, best_k_indices_for_basis, is_optimal, argmax_time = \
+                self._perform_argmax_operation(self.x_candidate)
+
+            optimal_fraction = np.mean(is_optimal) if len(is_optimal) > 0 else 1.0
+            suboptimal_indices = np.where(is_optimal == False)[0]
+            self.logger.info(f"Iter {iter_count}: Optimality check found {optimal_fraction*100:.2f}% optimal scenarios. "
+                             f"Solving {len(suboptimal_indices)} subproblems.")
+
+            # Get warmstarting basis for all subproblems
             vbasis_batch, cbasis_batch = self.argmax_op.get_basis(best_k_indices_for_basis)
 
-            # 3. Subproblem Solver
-            obj_all_sp, pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, simplex_iter_count, subproblem_time = \
-                self._solve_subproblems(self.x_candidate, vbasis_batch, cbasis_batch)
-            
-            mean_simplex_iter = np.mean(simplex_iter_count)
-            num_zero_iter = np.sum(simplex_iter_count == 0)
+            # 3. Subproblem Solver: Solve only for suboptimal scenarios
+            obj_suboptimal, pi_suboptimal, rc_suboptimal, vbasis_out_suboptimal, cbasis_out_suboptimal, _, subproblem_time = \
+                self._solve_subproblems(self.x_candidate, vbasis_batch, cbasis_batch, subset_indices=suboptimal_indices)
 
             # 4. Add newly found duals to ArgmaxOperation
-            if best_k_scores.size > 0:
-                score_differences = obj_all_sp - best_k_scores
+            if len(suboptimal_indices) > 0:
+                score_differences = obj_suboptimal - best_k_scores[suboptimal_indices]
+                coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(
+                    pi_suboptimal, rc_suboptimal, vbasis_out_suboptimal, cbasis_out_suboptimal, score_differences
+                )
+                self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}.")
             else:
-                score_differences = None
-            
-            coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(pi_all_sp, rc_all_sp, vbasis_out_sp, cbasis_out_sp, score_differences)
-            self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}.")
+                # No suboptimal problems were solved, so no new duals to add
+                coverage_fraction, duals_added_count, duals_update_time = 1.0, 0, 0.0
 
-            # 5. Calculate the new cut and actual decrease
-            subproblem_actual_q_x, cut_added, cut_calc_time = self._calculate_and_add_cut(self.x_candidate, pi_all_sp)
+            # 5. Calculate the new cut using overrides
+            subproblem_actual_q_x, cut_added, cut_calc_time = self._calculate_and_add_cut(
+                self.x_candidate, suboptimal_indices, pi_suboptimal, rc_suboptimal
+            )
             
             actual_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
                               self.master_problem.calculate_estimated_objective(self.x_candidate)
@@ -444,11 +459,10 @@ class BendersSolver:
                 "rho": self.rho,
                 "cut_added": cut_added,
                 "gap": gap,
-                "mean_simplex_iter": mean_simplex_iter,
-                "num_zero_iter": num_zero_iter,
                 "x_norm": scipy.linalg.norm(self.x_candidate),
                 "argmax_num_pi": self.argmax_op.num_pi,
                 "coverage_fraction": coverage_fraction,
+                "optimal_fraction": optimal_fraction,
                 "perceived_decrease": perceived_decrease,
                 "actual_decrease": actual_decrease,
                 "fcd": fcd,
