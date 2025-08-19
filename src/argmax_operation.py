@@ -520,10 +520,19 @@ class ArgmaxOperation:
             best_k_indices_cpu = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
             self.update_lru_on_access(best_k_indices_cpu)
 
-    def calculate_cut_coefficients(self) -> Optional[Tuple[float, np.ndarray]]:
+    def calculate_cut_coefficients(self,
+                               override_indices: Optional[np.ndarray] = None,
+                               override_pi: Optional[np.ndarray] = None,
+                               override_rc: Optional[np.ndarray] = None) -> Optional[Tuple[float, np.ndarray]]:
         """
-        Calculates Benders cut coefficients (alpha, beta) using the pre-computed
-        best_k_indices from the `find_best_k` method.
+        Calculates Benders cut coefficients (alpha, beta) using pre-computed
+        best_k_indices from `find_best_k`. Allows for temporary, non-destructive
+        overwriting of pi and rc values for a subset of scenarios.
+
+        Args:
+            override_indices: Optional. 1D NumPy array of scenario indices to override.
+            override_pi: Optional. 2D NumPy array of new pi vectors for the override indices.
+            override_rc: Optional. 2D NumPy array of new rc vectors for the override indices.
 
         Returns:
             A tuple (alpha, beta) or None if `find_best_k` has not been run.
@@ -534,14 +543,52 @@ class ArgmaxOperation:
             print("Error: `find_best_k` must be run before calculating coefficients.")
             return None
 
+        # --- Input Validation for Overrides ---
+        has_override = override_indices is not None
+        if has_override:
+            if not (override_pi is not None and override_rc is not None):
+                raise ValueError("If overriding, all three must be provided: override_indices, override_pi, override_rc.")
+            if not (override_indices.ndim == 1 and override_pi.ndim == 2 and override_rc.ndim == 2):
+                raise ValueError("Override arrays have incorrect dimensions.")
+            num_overrides = len(override_indices)
+            if not (override_pi.shape == (num_overrides, self.NUM_STAGE2_ROWS) and override_rc.shape == (num_overrides, self.NUM_BOUNDED_VARS)):
+                raise ValueError("Shape mismatch in override_pi or override_rc.")
+            if np.any(override_indices < 0) or np.any(override_indices >= self.num_scenarios):
+                raise ValueError("override_indices contains out-of-bounds values.")
+
         with torch.no_grad():
             active_pi_gpu = self.pi_gpu[:self.num_pi]
             active_rc_gpu = self.rc_gpu[:self.num_pi]
-            
-            # --- Select the pi, lambda, mu based on best_k_indices ---
+            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]
             best_k_indices_slice = self.best_k_indices_gpu[:self.num_scenarios]
+
+            # --- Select pi, rc, and short_pi based on best_k_indices ---
             selected_pi = active_pi_gpu[best_k_indices_slice]
             selected_rc = active_rc_gpu[best_k_indices_slice]
+            selected_short_pi = active_short_pi_gpu[best_k_indices_slice]
+
+            # --- Apply Overrides (Non-Destructive) ---
+            if has_override:
+                # Clone tensors to avoid modifying the original data
+                selected_pi = selected_pi.clone()
+                selected_rc = selected_rc.clone()
+                selected_short_pi = selected_short_pi.clone()
+
+                # Transfer override data to GPU
+                override_indices_gpu = torch.from_numpy(override_indices).to(self.device, dtype=torch.long)
+                override_pi_gpu = torch.from_numpy(override_pi).to(self.device, dtype=selected_pi.dtype)
+                override_rc_gpu = torch.from_numpy(override_rc).to(self.device, dtype=selected_rc.dtype)
+
+                # Scatter new values into the cloned tensors
+                selected_pi[override_indices_gpu] = override_pi_gpu
+                selected_rc[override_indices_gpu] = override_rc_gpu
+
+                # Update the corresponding short_pi values
+                if self.R_SPARSE_LEN > 0:
+                    override_short_pi_gpu = override_pi_gpu[:, self.r_sparse_indices_gpu]
+                    selected_short_pi[override_indices_gpu] = override_short_pi_gpu
+
+            # --- Calculate lambda and mu from the (potentially overridden) rc ---
             selected_lambda = torch.clamp(selected_rc, min=0)
             selected_mu = torch.clamp(-selected_rc, min=0)
 
@@ -550,14 +597,8 @@ class ArgmaxOperation:
             Avg_Lambda = torch.mean(selected_lambda.to(torch.float64), dim=0)
             Avg_Mu = torch.mean(selected_mu.to(torch.float64), dim=0)
 
-            # We need to re-calculate E[s_i] = E[pi_k*^T * delta_r_i]
-            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]
-            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :]  # (num_scenarios, R_SPARSE_LEN)
-            best_k_indices_slice = self.best_k_indices_gpu[:self.num_scenarios]
-            selected_short_pi = active_short_pi_gpu[best_k_indices_slice] # (num_scenarios, R_SPARSE_LEN)
-            
-            # scenario dependent part: pi^T delta_r
-            # Element-wise product and sum over R_SPARSE_LEN dimension
+            # --- Calculate E[s_i] = E[pi_k*^T * delta_r_i] ---
+            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :]
             s_all_scenarios = (selected_short_pi * active_scenario_data_gpu).sum(dim=1)
             Avg_S = torch.mean(s_all_scenarios.to(torch.float64))
 
