@@ -147,6 +147,84 @@ class TestParallelSecondStageWorkerAgainstSAA(unittest.TestCase):
             if parallel_worker is not None:
                 parallel_worker.close()
 
+    def test_solve_batch_with_subset_indices(self):
+        """
+        Tests that solve_batch correctly processes only a subset of scenarios
+        when `subset_indices` is provided.
+        """
+        num_parallel_workers = 4
+        with ParallelSecondStageWorker.from_smps_reader(self.reader, num_parallel_workers) as worker:
+            # Select a random subset of scenarios to solve
+            subset_size = self.num_scenarios_ref // 2
+            np.random.seed(42) # for reproducibility
+            subset_indices = np.random.choice(self.num_scenarios_ref, size=subset_size, replace=False)
+            subset_indices.sort() # Sorting is not required by the function but makes comparison easier
+
+            obj_vals, y_sols, _, _, _, _, _ = worker.solve_batch(
+                x=self.x_sol_ref,
+                short_delta_r_batch=self.short_delta_r_all,
+                subset_indices=subset_indices
+            )
+
+            # --- Assertions ---
+            self.assertEqual(len(obj_vals), subset_size, "Number of returned objective values should match subset size.")
+            self.assertEqual(y_sols.shape[0], subset_size, "Number of returned y-solutions should match subset size.")
+
+            # Compare results against the reference HDF5 data for the selected subset
+            expected_y_sols = self.y_s_ref[subset_indices, :]
+            np.testing.assert_allclose(
+                y_sols,
+                expected_y_sols,
+                rtol=1e-4,
+                atol=1e-5,
+                err_msg="Y-solutions for subset do not match reference data."
+            )
+
+    def test_solve_batch_with_empty_subset(self):
+        """
+        Tests that solve_batch returns empty, correctly shaped arrays when an
+        empty `subset_indices` is provided.
+        """
+        num_parallel_workers = 2
+        with ParallelSecondStageWorker.from_smps_reader(self.reader, num_parallel_workers) as worker:
+            empty_indices = np.array([], dtype=int)
+            
+            obj_vals, y_sols, pi_sols, rc_sols, vbasis, cbasis, iters = worker.solve_batch(
+                x=self.x_sol_ref,
+                short_delta_r_batch=self.short_delta_r_all,
+                subset_indices=empty_indices
+            )
+
+            # --- Assertions for empty results ---
+            self.assertEqual(len(obj_vals), 0)
+            self.assertEqual(y_sols.shape[0], 0)
+            self.assertEqual(pi_sols.shape[0], 0)
+            self.assertEqual(rc_sols.shape[0], 0)
+            self.assertEqual(vbasis.shape[0], 0)
+            self.assertEqual(cbasis.shape[0], 0)
+            self.assertEqual(len(iters), 0)
+            
+            # Check that the dimensions other than the scenario count are correct
+            self.assertEqual(y_sols.shape[1], self.reader.d.shape[0])
+            self.assertEqual(pi_sols.shape[1], self.reader.r_bar.shape[0])
+
+
+    def test_solve_batch_with_invalid_subset_indices(self):
+        """
+        Tests that solve_batch raises a ValueError if `subset_indices` contains
+        an out-of-bounds index.
+        """
+        num_parallel_workers = 2
+        with ParallelSecondStageWorker.from_smps_reader(self.reader, num_parallel_workers) as worker:
+            invalid_indices = np.array([0, self.num_scenarios_ref, self.num_scenarios_ref + 1])
+            
+            with self.assertRaises(ValueError):
+                worker.solve_batch(
+                    x=self.x_sol_ref,
+                    short_delta_r_batch=self.short_delta_r_all,
+                    subset_indices=invalid_indices
+                )
+
 if __name__ == '__main__':
     # This allows running the tests directly from the command line
     unittest.main()

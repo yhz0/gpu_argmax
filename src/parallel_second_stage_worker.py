@@ -257,94 +257,116 @@ class ParallelSecondStageWorker:
 
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
-                    cbasis_batch: Optional[np.ndarray] = None, nontrivial_rc_only = True) \
+                    cbasis_batch: Optional[np.ndarray] = None,
+                    nontrivial_rc_only: bool = True,
+                    subset_indices: Optional[np.ndarray] = None) \
                     -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Solves a batch of second-stage scenarios in parallel using a worker pool.
 
-        This method distributes the scenario solves across a pool of worker processes.
-        It ensures that all workers are synchronized with the provided first-stage
-        solution `x` before solving the scenarios.
+        This method distributes scenario solves across a pool of worker processes.
+        It ensures all workers are synchronized with the provided first-stage
+        solution `x` before solving.
 
         Args:
-            x: The first-stage solution vector to synchronize with workers.
+            x: The first-stage solution vector.
             short_delta_r_batch: Batch of scenario-specific RHS modifications.
             vbasis_batch: Optional batch of variable basis statuses.
             cbasis_batch: Optional batch of constraint basis statuses.
             nontrivial_rc_only: If True, returns only non-trivial reduced costs.
+            subset_indices: An optional array of indices. If provided, only scenarios
+                            corresponding to these indices are solved. This is useful
+                            in procedures like argmax where only a subset of scenarios
+                            needs re-evaluation. The results will have a length equal
+                            to `len(subset_indices)`.
 
         Returns:
-            A tuple containing:
-            - obj_values_all: Objective values for each scenario.
-            - y_solutions_all: Solution vectors for second-stage variables.
-            - pi_solutions_all: Dual variable solutions.
-            - rc_solutions_all: Reduced costs.
-            - vbasis_all: Basis statuses for variables.
-            - cbasis_all: Basis statuses for constraints.
-            - iter_count_all: Simplex iteration counts for each scenario.
+            A tuple containing arrays for the solved scenarios:
+            - obj_values: Objective values.
+            - y_solutions: Solution vectors for second-stage variables.
+            - pi_solutions: Dual variable solutions.
+            - rc_solutions: Reduced costs.
+            - vbasis_out: Basis statuses for variables.
+            - cbasis_out: Basis statuses for constraints.
+            - iter_counts: Simplex iteration counts.
 
         Raises:
             RuntimeError: If the worker has been closed or the pool is not initialized.
+            ValueError: If `subset_indices` contains out-of-bounds indices.
         """
-
         if self._closed:
             raise RuntimeError("ParallelSecondStageWorker has been closed.")
-        
-        rc_length = len(self._rc_mask[0]) if nontrivial_rc_only else self._num_y_vars
 
-        num_scenarios = short_delta_r_batch.shape[0]
-        if num_scenarios == 0:
-            return (np.array([]), # obj_values
-                    np.empty((0, self._num_y_vars), dtype=float), # y_solutions
-                    np.empty((0, self._num_stage2_constrs), dtype=float), # pi_solutions
-                    np.empty((0, rc_length), dtype=float), # rc_solutions
-                    np.empty((0, self._num_y_vars), dtype=np.int8), # vbasis_all
-                    np.empty((0, self._num_stage2_constrs), dtype=np.int8), # cbasis_all
-                    np.array([])) # iter_count_all
+        rc_length = len(self._rc_mask[0]) if nontrivial_rc_only else self._num_y_vars
+        
+        # Determine which scenario indices to process
+        if subset_indices is not None:
+            if len(subset_indices) == 0:
+                return (np.array([]), np.empty((0, self._num_y_vars)), np.empty((0, self._num_stage2_constrs)),
+                        np.empty((0, rc_length)), np.empty((0, self._num_y_vars), dtype=np.int8),
+                        np.empty((0, self._num_stage2_constrs), dtype=np.int8), np.array([]))
+            
+            # Validate indices
+            max_index = np.max(subset_indices)
+            if max_index >= len(short_delta_r_batch):
+                raise ValueError(f"Index {max_index} in subset_indices is out of bounds for "
+                                 f"short_delta_r_batch with size {len(short_delta_r_batch)}.")
+            
+            indices_to_process = subset_indices
+            num_scenarios_to_solve = len(indices_to_process)
+        else:
+            num_scenarios_to_solve = short_delta_r_batch.shape[0]
+            if num_scenarios_to_solve == 0:
+                return (np.array([]), np.empty((0, self._num_y_vars)), np.empty((0, self._num_stage2_constrs)),
+                        np.empty((0, rc_length)), np.empty((0, self._num_y_vars), dtype=np.int8),
+                        np.empty((0, self._num_stage2_constrs), dtype=np.int8), np.array([]))
+            indices_to_process = np.arange(num_scenarios_to_solve)
 
         self._synchronize_x_with_workers(x)
-        if self._pool is None: # Should be initialized by _synchronize_x_with_workers
-            raise RuntimeError("Worker pool was not initialized, even after synchronization attempt.")
+        if self._pool is None:
+            raise RuntimeError("Worker pool not initialized after synchronization.")
 
         tasks = []
-        for i in range(num_scenarios):
-            vb_i = vbasis_batch[i] if vbasis_batch is not None and i < len(vbasis_batch) else None
-            cb_i = cbasis_batch[i] if cbasis_batch is not None and i < len(cbasis_batch) else None
-            tasks.append((i, short_delta_r_batch[i], vb_i, cb_i, x.copy(), nontrivial_rc_only))
+        for original_idx in indices_to_process:
+            vb_i = vbasis_batch[original_idx] if vbasis_batch is not None else None
+            cb_i = cbasis_batch[original_idx] if cbasis_batch is not None else None
+            tasks.append((original_idx, short_delta_r_batch[original_idx], vb_i, cb_i, x.copy(), nontrivial_rc_only))
 
         results_from_pool = self._pool.map(solve_scenario_task_glob_worker, tasks)
 
-        # Initialize arrays to store results
-        obj_values_all = np.empty(num_scenarios, dtype=float)
-        y_solutions_all = np.empty((num_scenarios, self._num_y_vars), dtype=float)
-        pi_solutions_all = np.empty((num_scenarios, self._num_stage2_constrs), dtype=float)
-        rc_solutions_all = np.empty((num_scenarios, rc_length), dtype=float)
-        iter_count_all = np.empty(num_scenarios, dtype=int)
-        # Initialize basis arrays with the placeholder value
-        vbasis_all = np.full((num_scenarios, self._num_y_vars),
-                             fill_value=self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
-        cbasis_all = np.full((num_scenarios, self._num_stage2_constrs),
-                             fill_value=self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
+        # Create a mapping from original scenario index to the position in the output arrays
+        if subset_indices is not None:
+            result_pos_map = {original_idx: i for i, original_idx in enumerate(subset_indices)}
+        else:
+            result_pos_map = {i: i for i in range(num_scenarios_to_solve)}
+
+        # Initialize arrays to store results, sized for the number of scenarios solved
+        obj_values = np.empty(num_scenarios_to_solve, dtype=float)
+        y_solutions = np.empty((num_scenarios_to_solve, self._num_y_vars), dtype=float)
+        pi_solutions = np.empty((num_scenarios_to_solve, self._num_stage2_constrs), dtype=float)
+        rc_solutions = np.empty((num_scenarios_to_solve, rc_length), dtype=float)
+        iter_counts = np.empty(num_scenarios_to_solve, dtype=int)
+        vbasis_out = np.full((num_scenarios_to_solve, self._num_y_vars), self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
+        cbasis_out = np.full((num_scenarios_to_solve, self._num_stage2_constrs), self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
 
         for result_tuple in results_from_pool:
-            # Unpack results, now including vbasis_out and cbasis_out
-            scenario_idx, obj_val, y_sol, pi_sol, rc_sol, vbasis_out, cbasis_out, simplex_iter_count = result_tuple
+            original_idx, obj_val, y_sol, pi_sol, rc_sol, vb_out, cb_out, simplex_iter = result_tuple
+            
+            # Use the map to find the correct position in the output arrays
+            pos = result_pos_map[original_idx]
 
-            obj_values_all[scenario_idx] = obj_val
-            y_solutions_all[scenario_idx, :] = y_sol
-            pi_solutions_all[scenario_idx, :] = pi_sol
-            rc_solutions_all[scenario_idx, :] = rc_sol
-            iter_count_all[scenario_idx] = simplex_iter_count
+            obj_values[pos] = obj_val
+            y_solutions[pos, :] = y_sol
+            pi_solutions[pos, :] = pi_sol
+            rc_solutions[pos, :] = rc_sol
+            iter_counts[pos] = simplex_iter
 
-            if vbasis_out is not None:
-                vbasis_all[scenario_idx, :] = vbasis_out
-            # Else, it remains the placeholder value
+            if vb_out is not None:
+                vbasis_out[pos, :] = vb_out
+            if cb_out is not None:
+                cbasis_out[pos, :] = cb_out
 
-            if cbasis_out is not None:
-                cbasis_all[scenario_idx, :] = cbasis_out
-            # Else, it remains the placeholder value
-
-        return obj_values_all, y_solutions_all, pi_solutions_all, rc_solutions_all, vbasis_all, cbasis_all, iter_count_all
+        return obj_values, y_solutions, pi_solutions, rc_solutions, vbasis_out, cbasis_out, iter_counts
 
     def _close_pool_resources(self):
         """Helper to close and join the current pool."""
