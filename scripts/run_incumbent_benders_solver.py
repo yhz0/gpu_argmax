@@ -180,7 +180,7 @@ class BendersSolver:
         self.argmax_op.find_best_k(current_x)
         
         # Perform the optimality check using the results from find_best_k
-        PRIMAL_FEAS_TOL = self.config.get('primal_feas_tol', 1e-2)
+        PRIMAL_FEAS_TOL = self.config.get('primal_feas_tol', 1e-3)
         is_optimal = self.argmax_op.check_optimality(current_x, primal_feas_tol=PRIMAL_FEAS_TOL)
         cut_info = self.argmax_op.calculate_cut_coefficients()
 
@@ -384,7 +384,7 @@ class BendersSolver:
             perceived_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
                                  self.master_problem.calculate_estimated_objective(self.x_candidate)
 
-            if perceived_decrease < 0.0:
+            if perceived_decrease < -1e-3:
                 self.logger.warning(f"Iteration {iter_count}: Perceived decrease is negative ({perceived_decrease:.4f}). Numerical issues may be present.")
                 perceived_decrease = 0.0
             
