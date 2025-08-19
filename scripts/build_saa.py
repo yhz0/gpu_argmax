@@ -24,6 +24,7 @@ sys.path.append(project_root)
 
 try:
     from src.smps_reader import SMPSReader
+    from src.parallel_second_stage_worker import ParallelSecondStageWorker
 except ImportError:
     logger.error("Could not import SMPSReader from src.")
     logger.error("Ensure 'smps_reader.py' is in the 'src' directory and the script is run from the project root.")
@@ -53,7 +54,7 @@ class SAABuilder:
         self.time_filepath = time_filepath
         self.sto_filepath = sto_filepath
         self.num_scenarios = num_scenarios
-        self.random_seed = random_seed
+        self.random_seed = int(random_seed) if random_seed is not None else 42
         self.num_threads = num_threads
 
         self.reader: Optional[SMPSReader] = None
@@ -69,6 +70,12 @@ class SAABuilder:
         self.stage2_solution_all: Optional[np.ndarray] = None
         self.stage2_duals_all: Optional[np.ndarray] = None
         self.basis_info: Optional[Dict[str, np.ndarray]] = None
+
+        # Attributes for cleaned-up results from parallel worker
+        self.stage2_duals_all_clean: Optional[np.ndarray] = None
+        self.stage2_rc_all_clean: Optional[np.ndarray] = None
+        self.vbasis_y_all_clean: Optional[np.ndarray] = None
+        self.cbasis_y_all_clean: Optional[np.ndarray] = None
 
         self.num_x = 0
         self.num_y = 0
@@ -366,8 +373,6 @@ class SAABuilder:
 
             N = self.num_scenarios
             self.basis_info = {
-                'cbasis_x': cbasis[:self.num_cons1],
-                'vbasis_x': vbasis[:self.num_x],
                 'cbasis_y_all': cbasis[self.num_cons1:].reshape((N, self.num_cons2)) if self.num_cons2 > 0 else np.array([]).reshape(N, 0),
                 'vbasis_y_all': vbasis[self.num_x:].reshape((N, self.num_y)) if self.num_y > 0 else np.array([]).reshape(N, 0)
             }
@@ -419,27 +424,88 @@ class SAABuilder:
         """Helper to save primal/dual solution to HDF5 file."""
         sol_grp = h5file.create_group("solution")
         if self.solution_status == GRB.OPTIMAL:
-            sol_grp.create_dataset("primal/x", data=self.stage1_solution or np.array([]), compression="gzip")
-            sol_grp.create_dataset("primal/y_s", data=self.stage2_solution_all or np.array([]), compression="gzip")
-            sol_grp.create_dataset("dual/pi_s", data=self.stage2_duals_all or np.array([]), compression="gzip")
+            primal_grp = sol_grp.create_group("primal")
+            primal_grp.create_dataset("x", data=self.stage1_solution if self.stage1_solution is not None else np.array([]), compression="gzip")
+            primal_grp.create_dataset("y_s", data=self.stage2_solution_all if self.stage2_solution_all is not None else np.array([]), compression="gzip")
+
+            dual_grp = sol_grp.create_group("dual")
+            if self.stage2_duals_all_clean is not None:
+                logger.info("Saving cleaned duals (pi_s) from parallel worker.")
+                dual_grp.create_dataset("pi_s", data=self.stage2_duals_all_clean, compression="gzip")
+            else: # Fallback to original duals if clean ones are not available
+                logger.warning("Cleaned duals not available, falling back to original SAA duals.")
+                dual_grp.create_dataset("pi_s", data=self.stage2_duals_all if self.stage2_duals_all is not None else np.array([]), compression="gzip")
+
+            if self.stage2_rc_all_clean is not None:
+                logger.info("Saving cleaned reduced costs (rc) from parallel worker.")
+                dual_grp.create_dataset("rc", data=self.stage2_rc_all_clean, compression="gzip")
+            else:
+                logger.info("No reduced cost information available, saving empty rc dataset.")
+                dual_grp.create_dataset("rc", data=np.array([]))
         else:
             logger.info("No optimal solution found, saving empty solution datasets.")
             sol_grp.create_dataset("primal/x", data=np.array([]))
             sol_grp.create_dataset("primal/y_s", data=np.array([]))
             sol_grp.create_dataset("dual/pi_s", data=np.array([]))
+            sol_grp.create_dataset("dual/rc", data=np.array([]))
 
     def _save_hdf5_basis(self, h5file):
         """Helper to save basis information to HDF5 file."""
         basis_grp = h5file.create_group("basis")
-        if self.basis_info:
-            for key, value in self.basis_info.items():
-                basis_grp.create_dataset(key, data=value, compression="gzip")
+        if self.cbasis_y_all_clean is not None and self.vbasis_y_all_clean is not None:
+            logger.info("Saving cleaned basis information from parallel worker.")
+            basis_grp.create_dataset('cbasis_y_all', data=self.cbasis_y_all_clean, compression="gzip")
+            basis_grp.create_dataset('vbasis_y_all', data=self.vbasis_y_all_clean, compression="gzip")
         else:
-            logger.info("No basis information available, saving empty basis datasets.")
-            basis_grp.create_dataset('cbasis_x', data=np.array([]))
-            basis_grp.create_dataset('vbasis_x', data=np.array([]))
+            logger.info("No cleaned basis information available, saving empty basis datasets.")
             basis_grp.create_dataset('cbasis_y_all', data=np.array([]))
             basis_grp.create_dataset('vbasis_y_all', data=np.array([]))
+
+    def _resolve_second_stage_in_parallel(self):
+        """
+        Uses ParallelSecondStageWorker to re-solve all second-stage problems
+        to get clean duals, reduced costs, and basis information.
+        """
+        if self.solution_status != GRB.OPTIMAL:
+            logger.warning("Skipping parallel re-solve because SAA was not optimal.")
+            return
+        if self.reader is None or self.stage1_solution is None:
+            logger.error("Cannot re-solve: SMPS reader not initialized or no stage 1 solution.")
+            return
+        if self.num_cons2 == 0:
+            logger.info("No second-stage problems to re-solve.")
+            return
+
+        logger.info("Step 6a: Re-solving second-stage problems in parallel for clean results...")
+        resolve_start_time = time.time()
+
+        num_workers = self.num_threads if self.num_threads is not None and self.num_threads > 0 else os.cpu_count() or 1
+        
+        try:
+            with ParallelSecondStageWorker.from_smps_reader(self.reader, num_workers) as worker:
+                # We need the deviation from the mean RHS (delta_r) for the worker
+                delta_r_batch = self.reader.get_short_delta_r(self.batch_stochastic_parts)
+
+                # The `solve_batch` method will return all required information
+                _, _, pi_sol, rc_sol, vbasis, cbasis, _ = worker.solve_batch(
+                    x=self.stage1_solution,
+                    short_delta_r_batch=delta_r_batch,
+                    nontrivial_rc_only=True # As per requirement
+                )
+
+                # Store the clean results
+                self.stage2_duals_all_clean = pi_sol
+                self.stage2_rc_all_clean = rc_sol
+                self.vbasis_y_all_clean = vbasis
+                self.cbasis_y_all_clean = cbasis
+
+            self.timing['resolve_parallel'] = time.time() - resolve_start_time
+            logger.info(f"Parallel re-solve complete. (Time: {self.timing['resolve_parallel']:.2f}s)")
+
+        except Exception as e:
+            logger.error(f"Error during parallel re-solve of second stage: {e}")
+            logger.error(traceback.format_exc())
+
 
     def run_pipeline(self, solve_model=True, save_hdf5=False, hdf5_filepath="saa_results.h5"):
         """Runs the full pipeline: Load -> Generate -> Build -> Solve -> Report -> Save."""
@@ -449,7 +515,11 @@ class SAABuilder:
             if solve_model:
                 self.solve()
                 self.report_results()
-                self.extract_basis()
+                # self.extract_basis() # No longer needed as we get basis from parallel worker
+
+                if self.solution_status == GRB.OPTIMAL:
+                    self._resolve_second_stage_in_parallel()
+
                 if save_hdf5 and self.solution_status is not None:
                     self.save_results_to_hdf5(hdf5_filepath)
         except Exception as e:

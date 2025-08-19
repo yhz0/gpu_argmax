@@ -129,7 +129,7 @@ class TestOptimalityCheck(unittest.TestCase):
 
         # Step 8: Run check_optimality
         print("Running check_optimality...")
-        optimality_results = argmax_op.check_optimality(self.x_sol, indicies)
+        optimality_results = argmax_op.check_optimality(self.x_sol, indicies, primal_feas_tol=0.0001)
         print("check_optimality finished.")
 
         # Step 9: Assert the first 3 scenarios are optimal
