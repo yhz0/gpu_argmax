@@ -96,19 +96,19 @@ def run_benchmark(N: int, M: int, DEVICE: str):
     x_dim = len(reader.x_indices) # 89 for ssn
     x_vector = np.random.rand(x_dim).astype(np.float32)
 
-    # --- Benchmark find_best_k ---
-    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of find_best_k...")
+    # --- Benchmark find_optimal_basis ---
+    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of find_optimal_basis...")
     if DEVICE == 'cuda':
         torch.cuda.synchronize()
     start_time_find = time.perf_counter()
     
-    argmax_op.find_best_k(x_vector)
+    argmax_op.find_optimal_basis(x_vector)
     
     if DEVICE == 'cuda':
         torch.cuda.synchronize()
     end_time_find = time.perf_counter()
     elapsed_time_find_ms = (end_time_find - start_time_find) * 1000.0
-    print(f"[{time.strftime('%H:%M:%S')}] find_best_k benchmark finished.")
+    print(f"[{time.strftime('%H:%M:%S')}] find_optimal_basis benchmark finished.")
 
     # --- Benchmark calculate_cut_coefficients ---
     print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of calculate_cut_coefficients...")
@@ -134,6 +134,6 @@ def run_benchmark(N: int, M: int, DEVICE: str):
     else:
         print("Cut calculation failed.")
     
-    print(f"\nExecution time for find_best_k: {elapsed_time_find_ms:.2f} ms")
+    print(f"\nExecution time for find_optimal_basis: {elapsed_time_find_ms:.2f} ms")
     print(f"Execution time for calculate_cut_coefficients: {elapsed_time_calc_ms:.2f} ms")
     print("------------------------------------------")

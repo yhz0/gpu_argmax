@@ -167,7 +167,7 @@ class BendersSolver:
             A tuple containing the estimated cost, scores, indices of best solutions, and execution time.
         """
         start_time = time.time()
-        self.argmax_op.find_best_k(current_x)
+        self.argmax_op.find_optimal_basis(current_x)
         cut_info = self.argmax_op.calculate_cut_coefficients()
 
         if cut_info is None:
@@ -178,7 +178,7 @@ class BendersSolver:
         else:
             alpha_pre, beta_pre = cut_info
             argmax_estim_q_x = alpha_pre + beta_pre @ current_x
-            best_k_scores, best_k_index = self.argmax_op.get_best_k_results()
+            best_k_scores, best_k_index, _ = self.argmax_op.get_best_k_results()
 
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_scores, best_k_index, solve_time

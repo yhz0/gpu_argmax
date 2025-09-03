@@ -31,9 +31,9 @@ The `ArgmaxOperation` class stores a set of candidate dual solutions obtained fr
 
 The calculation of Benders cuts has been refactored into a two-step process to separate the computationally intensive search for the best duals from the final coefficient calculation.
 
-#### Step 1: `find_best_k(x)` - Finding the Best Dual Solution
+#### Step 1: `find_optimal_basis(x)` - Finding the Best Dual Solution
 
-The `find_best_k(x)` method is the core of the operation. For a given first-stage decision vector `x`, it calculates a "score" for each scenario $\omega_i$ and each stored candidate dual solution `k`. This score is the objective function value of the dual problem:
+The `find_optimal_basis(x)` method is the core of the operation. For a given first-stage decision vector `x`, it calculates a "score" for each scenario $\omega_i$ and each stored candidate dual solution `k`. This score is the objective function value of the dual problem:
 
 `Score(k, i) = \pi_k^T (r(\omega_i) - Cx) - \lambda_k^T l + \mu_k^T u`
 
@@ -46,7 +46,7 @@ The results of this operation (the best indices `k*` and the corresponding maxim
 
 #### Step 2: `calculate_cut_coefficients()` - Aggregating Results
 
-Once `find_best_k(x)` has been run, the `calculate_cut_coefficients()` method can be called. This method uses the stored `best_k_indices` to:
+Once `find_optimal_basis(x)` has been run, the `calculate_cut_coefficients()` method can be called. This method uses the stored `best_k_indices` to:
 
 1.  Gather the corresponding dual vectors ($\pi_{k^*}, \lambda_{k^*}, \mu_{k^*}$) for each scenario.
 2.  Calculate the average of these vectors across all scenarios.
@@ -64,12 +64,12 @@ The new API is used as follows:
 
 # 1. Perform the expensive search for the best duals for each scenario.
 #    This stores the results internally.
-argmax_op.find_best_k(x)
+argmax_op.find_optimal_basis(x)
 
 # 2. Calculate the final Benders cut coefficients based on the stored results.
 alpha, beta = argmax_op.calculate_cut_coefficients()
 
 # 3. (Optional) Retrieve the detailed results for analysis.
-scores, indices = argmax_op.get_best_k_results()
+scores, indices, is_optimal = argmax_op.get_best_k_results()
 ```
-In essence, the `find_best_k` method identifies which of the previously generated dual solutions is most "binding" for each scenario, and `calculate_cut_coefficients` aggregates this information to form a single, valid Benders optimality cut.
+In essence, the `find_optimal_basis` method identifies which of the previously generated dual solutions is most "binding" for each scenario, and `calculate_cut_coefficients` aggregates this information to form a single, valid Benders optimality cut.

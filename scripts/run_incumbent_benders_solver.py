@@ -68,8 +68,7 @@ class BendersSolver:
             reader=self.reader,
             MAX_PI=self.config['MAX_PI'],
             MAX_OMEGA=self.config['MAX_OMEGA'],
-            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE'],
-            check_optimality=True
+            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE']
         )
         self.logger.info("ArgmaxOperation initialized.")
 
@@ -177,22 +176,19 @@ class BendersSolver:
             - solve_time (float): The execution time.
         """
         start_time = time.time()
-        self.argmax_op.find_best_k(current_x)
-        
-        # Perform the optimality check using the results from find_best_k
         PRIMAL_FEAS_TOL = self.config.get('primal_feas_tol', 1e-3)
-        is_optimal = self.argmax_op.check_optimality(current_x, primal_feas_tol=PRIMAL_FEAS_TOL)
+        self.argmax_op.find_optimal_basis(current_x, primal_feas_tol=PRIMAL_FEAS_TOL)
+        
         cut_info = self.argmax_op.calculate_cut_coefficients()
 
         if cut_info is None:
             self.logger.warning("ArgmaxOperation.calculate_cut_coefficients returned None. Argmax cost will be NaN.")
             argmax_estim_q_x = np.nan
-            best_k_scores = np.array([], dtype=float)
-            best_k_index = np.array([], dtype=int)
+            best_k_scores, best_k_index, is_optimal = np.array([]), np.array([]), np.array([])
         else:
             alpha_pre, beta_pre = cut_info
             argmax_estim_q_x = alpha_pre + beta_pre @ current_x
-            best_k_scores, best_k_index = self.argmax_op.get_best_k_results()
+            best_k_scores, best_k_index, is_optimal = self.argmax_op.get_best_k_results()
 
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_scores, best_k_index, is_optimal, solve_time

@@ -137,7 +137,7 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
 
         print("\nRunning test: Argmax calculation vs Expected objective...")
         # --- Perform the core calculation using the new two-step API ---
-        self.argmax_op.find_best_k(self.x_sol)
+        self.argmax_op.find_optimal_basis(self.x_sol)
         alpha, beta = self.argmax_op.calculate_cut_coefficients()
         
         # Calculate the estimated objective value: alpha + beta^T * x

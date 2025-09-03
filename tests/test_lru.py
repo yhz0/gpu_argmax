@@ -88,7 +88,7 @@ class TestLruEvictionPolicy(unittest.TestCase):
         MAX_PI_TEST = 2
         
         argmax_op = ArgmaxOperation.from_smps_reader(
-            self.reader, MAX_PI=MAX_PI_TEST, MAX_OMEGA=10, check_optimality=False
+            self.reader, MAX_PI=MAX_PI_TEST, MAX_OMEGA=10
         )
 
         # 1. Add first two unique bases
@@ -131,7 +131,7 @@ class TestLruEvictionPolicy(unittest.TestCase):
         MAX_PI_TEST = 2
 
         argmax_op = ArgmaxOperation.from_smps_reader(
-            self.reader, MAX_PI=MAX_PI_TEST, MAX_OMEGA=10, check_optimality=False
+            self.reader, MAX_PI=MAX_PI_TEST, MAX_OMEGA=10
         )
 
         # 1. Add first two unique bases

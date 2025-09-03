@@ -81,7 +81,6 @@ class TestOptimalityCheck(unittest.TestCase):
             MAX_PI=self.num_scenarios,
             MAX_OMEGA=self.num_scenarios,
             device='cpu',
-            check_optimality=True,
             optimality_dtype=torch.float64
         )
         
@@ -108,10 +107,10 @@ class TestOptimalityCheck(unittest.TestCase):
             argmax_op.add_pi(self.pi_s[s, :], np.array([]), self.vbasis_y_all[s, :], self.cbasis_y_all[s, :])
 
         # Step 5: Run argmax procedure
-        argmax_op.find_best_k(self.x_sol)
+        argmax_op.find_optimal_basis(self.x_sol, primal_feas_tol=1e-4)
         
         # Step 6: Sanity check the scores of the first 3 scenarios
-        scores, indicies = argmax_op.get_best_k_results()
+        scores, indicies, is_optimal = argmax_op.get_best_k_results()
 
         print("Performing sanity check on first 3 scenarios...")
         np.testing.assert_allclose(
@@ -126,26 +125,22 @@ class TestOptimalityCheck(unittest.TestCase):
         # Step 7: Compare scores of all scenarios with objectives for ground truth optimality
         # A scenario's argmax result is "optimal" if its score matches the true objective
         ground_truth_optimality = np.isclose(scores, ground_truth_objectives, rtol=1e-5, atol=1e-5)
-
-        # Step 8: Run check_optimality
-        print("Running check_optimality...")
-        optimality_results = argmax_op.check_optimality(self.x_sol, indicies, primal_feas_tol=0.0001)
-        print("check_optimality finished.")
-
-        # Step 9: Assert the first 3 scenarios are optimal
+        # Step 8 & 9: Assertions based on the new `is_optimal` flag
+        print("Asserting optimality results...")
+        # 1. Assert that the first `num_duals_to_add` scenarios are marked as optimal,
+        #    since their exact dual solutions were provided.
         self.assertTrue(
-            np.all(optimality_results[:num_duals_to_add]),
-            "First 3 scenarios were not all marked as optimal"
+            np.all(is_optimal[:num_duals_to_add]),
+            "First 3 scenarios were not all marked as optimal by the new method."
         )
-        print("Assertion passed: First 3 scenarios correctly marked as optimal.")
-
-        # Step 10: Assert the remaining scenarios match the ground truth
+        # 2. Assert that the optimality status for all scenarios matches the ground truth.
         np.testing.assert_array_equal(
-            optimality_results,
+            is_optimal,
             ground_truth_optimality,
-            err_msg="Optimality results do not match the ground truth"
+            err_msg="Optimality results from find_optimal_basis do not match the ground truth."
         )
-        print("Assertion passed: All optimality results match ground truth.")
+        print("All optimality assertions passed.")
+        
         print("Test completed successfully.")
 
 
