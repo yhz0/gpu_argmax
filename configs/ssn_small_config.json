@@ -1,0 +1,23 @@
+{
+    "smps_core_file": "./smps_data/ssn/ssn.mps",
+    "smps_time_file": "./smps_data/ssn/ssn.tim",
+    "smps_sto_file": "./smps_data/ssn/ssn.sto",
+    "input_h5_basis_file": "./ssn_1000scen_results.h5",
+    "MAX_PI": 50000,
+    "MAX_OMEGA": 15000,
+    "SCENARIO_BATCH_SIZE": 200,
+    "NUM_CANDIDATES": 100,
+    "NUM_SAMPLES_FOR_POOL": 15000,
+    "ETA_LOWER_BOUND": 0.0,
+    "initial_rho": 1.0,
+    "rho_increase_factor": 2.0,
+    "rho_decrease_factor": 0.5,
+    "min_rho": 1e-5,
+    "tolerance": 1e-4,
+    "gamma": 0.5,
+    "max_iterations": 50,
+    "num_duals_to_add_per_iteration": 500,
+    "argmax_tol_cutoff": 1e-5,
+    "primal_feas_tol": 1e-3,
+    "instance_name": "benders_run_ssn_small"
+}
