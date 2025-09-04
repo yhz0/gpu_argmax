@@ -19,5 +19,7 @@
     "num_duals_to_add_per_iteration": 20000,
     "argmax_tol_cutoff": 1e-5,
     "primal_feas_tol": 1e-2,
+    "num_lp_scenarios_per_iteration": 10000,
+    "lp_scenario_selection_strategy": "systematic",
     "instance_name": "benders_run_ssn"
 }

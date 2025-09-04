@@ -145,6 +145,10 @@ class BendersSolver:
             self.x_init = np.zeros(self.c_vector.shape[0])
         
         self.x_incumbent = self.x_init.copy()
+        
+        # Initialize scenario selection state
+        self._scenario_selection_offset = 0  # For systematic rotation
+        
         self.logger.info("--- Problem Setup Complete ---")
 
     def _solve_master_problem(self):
@@ -312,6 +316,105 @@ class BendersSolver:
         calc_time = time.time() - start_time
         return subproblem_actual_q_x, cut_added, calc_time
 
+    def _select_lp_scenarios(self, iteration: int) -> np.ndarray:
+        """
+        Select scenarios for LP solving based on configured strategy.
+        
+        Args:
+            iteration: Current iteration number (1-based)
+            
+        Returns:
+            Array of scenario indices to solve with LP solver
+        """
+        num_lp_scenarios = self.config.get('num_lp_scenarios_per_iteration', min(1000, self.short_delta_r.shape[0]))
+        strategy = self.config.get('lp_scenario_selection_strategy', 'systematic')
+        
+        # Ensure we don't exceed total number of scenarios
+        num_lp_scenarios = min(num_lp_scenarios, self.short_delta_r.shape[0])
+        
+        if strategy == 'systematic':
+            return self._systematic_scenario_selection(iteration, num_lp_scenarios)
+        elif strategy == 'priority':
+            return self._priority_scenario_selection(num_lp_scenarios)
+        elif strategy == 'random':
+            return self._random_scenario_selection(num_lp_scenarios)
+        else:
+            self.logger.warning(f"Unknown scenario selection strategy '{strategy}', defaulting to systematic")
+            return self._systematic_scenario_selection(iteration, num_lp_scenarios)
+
+    def _systematic_scenario_selection(self, iteration: int, num_to_select: int) -> np.ndarray:
+        """
+        Rotate through scenarios systematically to ensure all scenarios are eventually processed.
+        
+        Args:
+            iteration: Current iteration number (1-based)
+            num_to_select: Number of scenarios to select
+            
+        Returns:
+            Array of selected scenario indices
+        """
+        total_scenarios = self.short_delta_r.shape[0]
+        
+        # Calculate starting index with systematic rotation
+        start_idx = ((iteration - 1) * num_to_select) % total_scenarios
+        
+        if start_idx + num_to_select <= total_scenarios:
+            # Simple case: no wraparound needed
+            return np.arange(start_idx, start_idx + num_to_select)
+        else:
+            # Wraparound case: split selection
+            part1 = np.arange(start_idx, total_scenarios)
+            part2 = np.arange(0, num_to_select - len(part1))
+            return np.concatenate([part1, part2])
+
+    def _random_scenario_selection(self, num_to_select: int) -> np.ndarray:
+        """
+        Randomly select scenarios for LP solving.
+        
+        Args:
+            num_to_select: Number of scenarios to select
+            
+        Returns:
+            Array of selected scenario indices
+        """
+        total_scenarios = self.short_delta_r.shape[0]
+        return np.random.choice(total_scenarios, size=num_to_select, replace=False)
+
+    def _priority_scenario_selection(self, num_to_select: int) -> np.ndarray:
+        """
+        Select scenarios based on priority (future implementation).
+        Currently falls back to systematic selection.
+        
+        Args:
+            num_to_select: Number of scenarios to select
+            
+        Returns:
+            Array of selected scenario indices
+        """
+        # TODO: Implement priority-based selection using argmax gap or other metrics
+        # For now, use systematic selection as fallback
+        self.logger.debug("Priority-based selection not yet implemented, using systematic selection")
+        return self._systematic_scenario_selection(1, num_to_select)  # Use iteration=1 as default
+
+    def _compute_scenario_priorities(self, current_scores: np.ndarray) -> np.ndarray:
+        """
+        Compute priority scores for scenarios (future implementation).
+        
+        Args:
+            current_scores: Current argmax scores for all scenarios
+            
+        Returns:
+            Priority values for each scenario (higher = more important)
+        """
+        # TODO: Implement various priority metrics:
+        # - Argmax gap (difference between best and second-best dual)
+        # - Time since last LP solve for each scenario
+        # - Score uncertainty or variance
+        # - Problem-specific heuristics
+        
+        # Placeholder: return random priorities
+        return np.random.random(len(current_scores))
+
     def _log_iteration_data(self, iteration_metrics):
         """
         Logs the metrics for a single iteration of the Benders decomposition algorithm.
@@ -338,11 +441,13 @@ class BendersSolver:
         log_parts.append(f"CutAdded: {'Y' if log_metrics.get('cut_added') else 'N'}")
         log_parts.append(f"TimeIter: {log_metrics.get('total_iteration_time', 0):.2f}s")
         log_parts.append(f"(M:{log_metrics.get('master_solve_time',0):.2f}s, "
+                         f"W:{log_metrics.get('warmstart_time',0):.2f}s, "
                          f"A:{log_metrics.get('argmax_op_time',0):.2f}s, "
                          f"S:{log_metrics.get('subproblem_solve_time',0):.2f}s, "
                          f"D:{log_metrics.get('duals_update_time',0):.2f}s, "
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
         log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
+        log_parts.append(f"LPScenarios: {log_metrics.get('num_lp_scenarios', 0)}")
         log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")
         log_parts.append(f"Optimal%: {log_metrics.get('optimal_fraction', 0) * 100:.2f}%")
         self.logger.info(" | ".join(log_parts))
@@ -386,37 +491,53 @@ class BendersSolver:
                 self.logger.warning(f"Iteration {iter_count}: Perceived decrease is negative ({perceived_decrease:.4f}). Numerical issues may be present.")
                 perceived_decrease = 0.0
             
-            # 2. Perform Argmax Operation and Optimality Check
-            argmax_estim_q_x, best_k_scores, best_k_indices_for_basis, is_optimal, argmax_time = \
-                self._perform_argmax_operation(self.x_candidate)
+            # 2. Select scenarios for LP solving
+            selected_lp_scenarios = self._select_lp_scenarios(iter_count)
+            self.logger.info(f"Iter {iter_count}: Selected {len(selected_lp_scenarios)} scenarios for LP solving "
+                           f"(strategy: {self.config.get('lp_scenario_selection_strategy', 'systematic')})")
+            
+            # 3. Warmstart preparation: Run argmax with top-k on selected scenarios only
+            warmstart_start_time = time.time()
+            selected_best_scores, selected_best_indices, selected_is_optimal = \
+                self.argmax_op.find_optimal_basis_with_subset(self.x_candidate, selected_lp_scenarios)
+            
+            # Get warmstart basis for selected scenarios 
+            vbasis_batch, cbasis_batch = self.argmax_op.get_basis(selected_best_indices)
+            warmstart_time = time.time() - warmstart_start_time
+            
+            optimal_fraction = np.mean(selected_is_optimal) if len(selected_is_optimal) > 0 else 1.0
+            self.logger.debug(f"Iter {iter_count}: Warmstart found {optimal_fraction*100:.2f}% feasible among selected scenarios.")
 
-            optimal_fraction = np.mean(is_optimal) if len(is_optimal) > 0 else 1.0
-            suboptimal_indices = np.where(is_optimal == False)[0]
-            self.logger.info(f"Iter {iter_count}: Optimality check found {optimal_fraction*100:.2f}% optimal scenarios. "
-                             f"Solving {len(suboptimal_indices)} subproblems.")
+            # 4. LP Solving: Solve only the selected scenarios
+            obj_selected, pi_selected, rc_selected, vbasis_out_selected, cbasis_out_selected, _, subproblem_time = \
+                self._solve_subproblems(self.x_candidate, vbasis_batch, cbasis_batch, subset_indices=selected_lp_scenarios)
 
-            # Get warmstarting basis for all subproblems
-            vbasis_batch, cbasis_batch = self.argmax_op.get_basis(best_k_indices_for_basis)
-
-            # 3. Subproblem Solver: Solve only for suboptimal scenarios
-            obj_suboptimal, pi_suboptimal, rc_suboptimal, vbasis_out_suboptimal, cbasis_out_suboptimal, _, subproblem_time = \
-                self._solve_subproblems(self.x_candidate, vbasis_batch, cbasis_batch, subset_indices=suboptimal_indices)
-
-            # 4. Add newly found duals to ArgmaxOperation
-            if len(suboptimal_indices) > 0:
-                score_differences = obj_suboptimal - best_k_scores[suboptimal_indices]
+            # 5. Add all new duals from LP solving to ArgmaxOperation
+            if len(selected_lp_scenarios) > 0:
+                score_differences = obj_selected - selected_best_scores
                 coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(
-                    pi_suboptimal, rc_suboptimal, vbasis_out_suboptimal, cbasis_out_suboptimal, score_differences
+                    pi_selected, rc_selected, vbasis_out_selected, cbasis_out_selected, score_differences
                 )
                 self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}.")
             else:
-                # No suboptimal problems were solved, so no new duals to add
                 coverage_fraction, duals_added_count, duals_update_time = 1.0, 0, 0.0
 
-            # 5. Calculate the new cut using overrides
+            # 6. Fast cut generation: Run argmax (fast mode) on ALL scenarios
+            argmax_start_time = time.time()
+            self.argmax_op.find_optimal_basis_fast(self.x_candidate)
+            argmax_time = time.time() - argmax_start_time
+
+            # 7. Calculate cut using pure argmax (no overrides needed)
             subproblem_actual_q_x, cut_added, cut_calc_time = self._calculate_and_add_cut(
-                self.x_candidate, suboptimal_indices, pi_suboptimal, rc_suboptimal
+                self.x_candidate, None, None, None
             )
+            
+            # Get argmax estimation for logging
+            argmax_estim_q_x, _, _ = self.argmax_op.get_best_k_results()
+            if argmax_estim_q_x is not None and len(argmax_estim_q_x) > 0:
+                argmax_estim_q_x = np.mean(argmax_estim_q_x)  # Average score for logging
+            else:
+                argmax_estim_q_x = np.nan
             
             actual_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
                               self.master_problem.calculate_estimated_objective(self.x_candidate)
@@ -444,6 +565,7 @@ class BendersSolver:
             iteration_metrics = {
                 "iteration": iter_count,
                 "master_solve_time": master_time,
+                "warmstart_time": warmstart_time,
                 "argmax_op_time": argmax_time,
                 "subproblem_solve_time": subproblem_time,
                 "duals_update_time": duals_update_time,
@@ -464,7 +586,9 @@ class BendersSolver:
                 "perceived_decrease": perceived_decrease,
                 "actual_decrease": actual_decrease,
                 "fcd": fcd,
-                "successful_step": successful_step
+                "successful_step": successful_step,
+                "num_lp_scenarios": len(selected_lp_scenarios),
+                "lp_selection_strategy": self.config.get('lp_scenario_selection_strategy', 'systematic')
             }
             self._log_iteration_data(iteration_metrics)
 
