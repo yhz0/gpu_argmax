@@ -4,6 +4,9 @@ import logging
 import os
 import sys
 
+# Add src directory to Python path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
 def main():
     parser = argparse.ArgumentParser(description="A unified command-line interface for the project.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -130,21 +133,20 @@ def main():
 
 
 if __name__ == "__main__":
-    # DEBUG: Direct run for testing
-    import logging
-    import os
-    from scripts.run_incumbent_benders_solver import BendersSolver
+    # # DEBUG: Direct run for testing
+    # import logging
+    # import os
+    # from scripts.run_incumbent_benders_solver import BendersSolver
     
-    config_path = "configs/ssn_small_config.json"
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    # config_path = "configs/ssn_small_config.json"
+    # with open(config_path, 'r') as f:
+    #     config = json.load(f)
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    # logging.basicConfig(
+    #     level=logging.INFO,
+    #     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    #     datefmt='%Y-%m-%d %H:%M:%S'
+    # )
     
-    solver = BendersSolver(config=config)
-    solver.run()
-    # main()
+    # solver = BendersSolver(config=config)
+    main()

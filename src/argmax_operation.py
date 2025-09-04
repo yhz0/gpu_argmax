@@ -7,6 +7,7 @@ import math
 from typing import Tuple, Optional, Union, TYPE_CHECKING
 import threading
 from cachetools import LRUCache
+# from memory_monitor import MemoryMonitor # TODO: remove after debugging
 
 if TYPE_CHECKING:
     from smps_reader import SMPSReader
@@ -478,6 +479,10 @@ class ArgmaxOperation:
             raise ValueError("Input x has incorrect shape.")
 
         with torch.no_grad():
+            # # Initialize memory monitoring
+            # monitor = MemoryMonitor(self.device)
+            # monitor.set_baseline("find_optimal_basis_start")
+            
             # --- Prepare device data views ---
             active_pi_gpu = self.pi_gpu[:self.num_pi]  # shape: (num_pi, NUM_STAGE2_ROWS)
             active_rc_gpu = self.rc_gpu[:self.num_pi]  # shape: (num_pi, NUM_BOUNDED_VARS)
@@ -519,8 +524,12 @@ class ArgmaxOperation:
             feasible = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=torch.bool, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
 
             # --- Process scenarios in batches ---
+            # monitor.measure("after_preprocessing")
             num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
             for i in range(num_batches):
+                # batch_label = f"batch_{i+1}_of_{num_batches}"
+                # monitor.measure(f"{batch_label}_start")
+                
                 start_idx = i * self.scenario_batch_size
                 end_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
                 batch_size = end_idx - start_idx
@@ -603,8 +612,10 @@ class ArgmaxOperation:
                 rhs_candidates_slice.add_(delta_r_candidates_slice).sub_(expanded_non_basic_contrib_slice)  # shape: (total_candidates, NUM_STAGE2_ROWS)
 
                 # Solve all systems in one go (device-conditional approach)
+                # monitor.measure(f"{batch_label}_before_lu_solve")
                 torch.linalg.lu_solve(expanded_factors_slice, expanded_pivots_slice, 
                                     rhs_candidates_slice.unsqueeze(-1), out=solution_z_B_slice)
+                # monitor.measure(f"{batch_label}_after_lu_solve")
 
                 # Create 2D view for feasibility check (zero-cost view)
                 solution_z_B_2D = solution_z_B_slice.squeeze(-1)  # shape: (total_candidates, NUM_STAGE2_ROWS)
@@ -629,6 +640,21 @@ class ArgmaxOperation:
 
                 self.best_k_indices_gpu[start_idx:end_idx] = best_k_index_batch
                 self.best_k_scores_gpu[start_idx:end_idx] = best_k_scores_batch
+
+                # Clean up temporary tensors to prevent memory leaks
+                del factors_gpu, pivots_gpu, lb_gpu, ub_gpu, non_basic_contrib_gpu
+                del factors_batch_cpu, pivots_batch_cpu, lb_batch_cpu, ub_batch_cpu, non_basic_contrib_cpu  
+                del unique_candidate_indices, inverse_map
+                if self.device.type == 'cuda':
+                    del inverse_map_gpu
+                    torch.cuda.empty_cache()  # Force PyTorch to release cached GPU memory
+                
+                # monitor.measure(f"{batch_label}_after_cleanup")
+            
+            # # Final memory summary
+            # monitor.measure("all_batches_complete")
+            # print("\n=== BATCH MEMORY MONITORING SUMMARY ===")
+            # monitor.print_summary()
 
         if touch_lru:
             best_k_indices_cpu = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
