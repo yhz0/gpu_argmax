@@ -340,6 +340,7 @@ class BendersSolver:
         log_parts.append(f"(M:{log_metrics.get('master_solve_time',0):.2f}s, "
                          f"A:{log_metrics.get('argmax_op_time',0):.2f}s, "
                          f"S:{log_metrics.get('subproblem_solve_time',0):.2f}s, "
+                         f"D:{log_metrics.get('duals_update_time',0):.2f}s, "
                          f"C:{log_metrics.get('cut_calculation_time',0):.2f}s)")
         log_parts.append(f"ArgmaxNumPi: {log_metrics.get('argmax_num_pi', 0)}")
         log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")

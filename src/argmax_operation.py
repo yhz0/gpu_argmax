@@ -74,7 +74,16 @@ class ArgmaxOperation:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
+
+        
         print(f"[{time.strftime('%H:%M:%S')}] Using device: {self.device}")
+
+        # --- Enable TF32 for float types on CUDA ---
+        if (self.device.type == 'cuda' and 
+            optimality_dtype in [torch.float32, torch.float16, torch.bfloat16]):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            print(f"[{time.strftime('%H:%M:%S')}] Enabled TF32 for {optimality_dtype}")
 
         # --- Input Validation ---
         if r_bar.shape != (NUM_STAGE2_ROWS,): raise ValueError("r_bar shape mismatch.")
@@ -530,6 +539,7 @@ class ArgmaxOperation:
                 # batch_label = f"batch_{i+1}_of_{num_batches}"
                 # monitor.measure(f"{batch_label}_start")
                 
+                # print("batch", i+1, "of", num_batches, flush=True)
                 start_idx = i * self.scenario_batch_size
                 end_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
                 batch_size = end_idx - start_idx
@@ -548,13 +558,18 @@ class ArgmaxOperation:
                 candidate_indices_flat = top_k_indices.flatten()  # shape: (batch_size * effective_k,)
 
                 # Gather basis data from CPU cache
-                unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat.cpu(), return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
+                if self.device.type == 'cuda':
+                    unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat, return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
+                    unique_candidate_indices_cpu = unique_candidate_indices.cpu()
+                else:
+                    unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat, return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
+                    unique_candidate_indices_cpu = unique_candidate_indices
                 
-                factors_batch_cpu = self.basis_factors_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                pivots_batch_cpu = self.basis_pivots_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                lb_batch_cpu = self.basis_lb_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                ub_batch_cpu = self.basis_ub_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                non_basic_contrib_cpu = self.non_basic_contribution_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                factors_batch_cpu = self.basis_factors_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                pivots_batch_cpu = self.basis_pivots_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                lb_batch_cpu = self.basis_lb_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                ub_batch_cpu = self.basis_ub_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                non_basic_contrib_cpu = self.non_basic_contribution_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
                 
                 # Move data to GPU and expand to match the flattened workload
                 if self.device.type == 'cuda':
@@ -563,7 +578,7 @@ class ArgmaxOperation:
                     lb_gpu = lb_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
                     ub_gpu = ub_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
                     non_basic_contrib_gpu = non_basic_contrib_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    inverse_map_gpu = inverse_map.to(self.device)  # shape: (batch_size * effective_k,)
+                    inverse_map_gpu = inverse_map  # Already on GPU device
                 else:
                     # On CPU, avoid unnecessary copying
                     factors_gpu = factors_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
@@ -644,10 +659,10 @@ class ArgmaxOperation:
                 # Clean up temporary tensors to prevent memory leaks
                 del factors_gpu, pivots_gpu, lb_gpu, ub_gpu, non_basic_contrib_gpu
                 del factors_batch_cpu, pivots_batch_cpu, lb_batch_cpu, ub_batch_cpu, non_basic_contrib_cpu  
-                del unique_candidate_indices, inverse_map
+                del unique_candidate_indices, inverse_map, inverse_map_gpu
                 if self.device.type == 'cuda':
-                    del inverse_map_gpu
-                    torch.cuda.empty_cache()  # Force PyTorch to release cached GPU memory
+                    del unique_candidate_indices_cpu
+                    # torch.cuda.empty_cache()  # Force PyTorch to release cached GPU memory
                 
                 # monitor.measure(f"{batch_label}_after_cleanup")
             
