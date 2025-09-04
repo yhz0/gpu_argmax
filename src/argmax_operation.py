@@ -5,7 +5,6 @@ import hashlib
 import time
 import math
 from typing import Tuple, Optional, Union, TYPE_CHECKING
-import threading
 from cachetools import LRUCache
 # from memory_monitor import MemoryMonitor # TODO: remove after debugging
 
@@ -187,13 +186,6 @@ class ArgmaxOperation:
         # Non-Basic Contribution of N_j . i.e. N@z_N
         self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
 
-        # --- Threading Lock ---
-        self._lock = threading.Lock()
-
-        # --- Placeholders for results from find_optimal_basis ---
-        self.best_k_indices_gpu = torch.zeros((MAX_OMEGA,), dtype=torch.long, device=self.device)
-        self.best_k_scores_gpu = torch.zeros((MAX_OMEGA,), dtype=torch.float32, device=self.device)
-        self.is_verified_optimal_gpu = torch.zeros((MAX_OMEGA,), dtype=torch.bool, device=self.device)
 
         # Current candidate solution
         self.current_x_gpu = torch.zeros(X_DIM, dtype=torch.float32, device=self.device)
@@ -301,83 +293,80 @@ class ArgmaxOperation:
         new_vbasis = new_vbasis.astype(basis_np_dtype, copy=False)
         new_cbasis = new_cbasis.astype(basis_np_dtype, copy=False)
 
-        # --- Acquire Lock for Critical Section ---
-        with self._lock:
-            # Deduplication based on the (vbasis, cbasis) pair
-            current_hash = self._hash_basis_pair(new_vbasis, new_cbasis)
-            if current_hash in self.lru_manager:
-                # Touch the entry to mark it as recently used
-                _ = self.lru_manager[current_hash]
-                return False
+        # Deduplication based on the (vbasis, cbasis) pair
+        current_hash = self._hash_basis_pair(new_vbasis, new_cbasis)
+        if current_hash in self.lru_manager:
+            # Touch the entry to mark it as recently used
+            _ = self.lru_manager[current_hash]
+            return False
 
-            # Index determination
-            if len(self.lru_manager) >= self.MAX_PI:
-                lru_item = self.lru_manager.popitem()  # Remove the least recently used item
-                idx = lru_item[1]  # Get the index of the evicted item
-                del self.index_to_hash_map[idx]  # Remove from index map
-            else:
-                idx = len(self.lru_manager)
+        # Index determination
+        if len(self.lru_manager) >= self.MAX_PI:
+            lru_item = self.lru_manager.popitem()  # Remove the least recently used item
+            idx = lru_item[1]  # Get the index of the evicted item
+            del self.index_to_hash_map[idx]  # Remove from index map
+        else:
+            idx = len(self.lru_manager)
 
-            # Store basis only on CPU
-            self.vbasis_cpu[idx] = new_vbasis
-            self.cbasis_cpu[idx] = new_cbasis
+        # Store basis only on CPU
+        self.vbasis_cpu[idx] = new_vbasis
+        self.cbasis_cpu[idx] = new_cbasis
 
-            # Extract the 'short' version from pi using the sparse indices (on CPU)
-            # This is needed for efficient calculation later, store result on device
-            if self.R_SPARSE_LEN > 0:
-                short_new_pi = new_pi[self.r_sparse_indices_cpu]
-            else:
-                short_new_pi = np.array([], dtype=pi_np_dtype)
+        # Extract the 'short' version from pi using the sparse indices (on CPU)
+        # This is needed for efficient calculation later, store result on device
+        if self.R_SPARSE_LEN > 0:
+            short_new_pi = new_pi[self.r_sparse_indices_cpu]
+        else:
+            short_new_pi = np.array([], dtype=pi_np_dtype)
 
-            # Add pi, rc, and short_pi to target device (GPU)
-            # Use non-blocking transfers if on CUDA for potential overlap
-            is_cuda = self.device.type == 'cuda'
-            self.pi_gpu[idx].copy_(torch.from_numpy(new_pi), non_blocking=is_cuda)
-            self.rc_gpu[idx].copy_(torch.from_numpy(new_rc), non_blocking=is_cuda)
-            self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
+        # Add pi, rc, and short_pi to target device (GPU)
+        # Use non-blocking transfers if on CUDA for potential overlap
+        is_cuda = self.device.type == 'cuda'
+        self.pi_gpu[idx].copy_(torch.from_numpy(new_pi), non_blocking=is_cuda)
+        self.rc_gpu[idx].copy_(torch.from_numpy(new_rc), non_blocking=is_cuda)
+        self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
 
-            # --- Offline Factorization for Optimality Checking  ---
-            # 1. Construct the sparse basis matrix B
-            B = self._get_basis_matrix(new_vbasis, new_cbasis)
+        # --- Offline Factorization for Optimality Checking  ---
+        # 1. Construct the sparse basis matrix B
+        B = self._get_basis_matrix(new_vbasis, new_cbasis)
 
-            try:
-                # 2. Factorize B and cache the LU factors and pivots using PyTorch
-                B_dense_tensor = torch.from_numpy(B.toarray()).to(
-                    dtype=self.basis_factors_cpu.dtype,
-                    device=self.basis_factors_cpu.device
-                )
-                torch.linalg.lu_factor(
-                    B_dense_tensor,
-                    pivot=True,
-                    out=(self.basis_factors_cpu[idx], self.basis_pivots_cpu[idx])
-                )
-            except torch.linalg.LinAlgError:
-                print(f"Warning: Singular basis matrix encountered for new solution {self.num_pi}. "
-                      "Marking factors with NaN to fail optimality checks.")
-                # Mark with NaN so it never passes the optimality check
-                self.basis_factors_cpu[idx].fill_(float('nan'))
-                # Pivots can be zero, doesn't matter as NaN factors will propagate
-                self.basis_pivots_cpu[idx].zero_()
+        try:
+            # 2. Factorize B and cache the LU factors and pivots using PyTorch
+            B_dense_tensor = torch.from_numpy(B.toarray()).to(
+                dtype=self.basis_factors_cpu.dtype,
+                device=self.basis_factors_cpu.device
+            )
+            torch.linalg.lu_factor(
+                B_dense_tensor,
+                pivot=True,
+                out=(self.basis_factors_cpu[idx], self.basis_pivots_cpu[idx])
+            )
+        except torch.linalg.LinAlgError:
+            print(f"Warning: Singular basis matrix encountered for new solution {self.num_pi}. "
+                  "Marking factors with NaN to fail optimality checks.")
+            # Mark with NaN so it never passes the optimality check
+            self.basis_factors_cpu[idx].fill_(float('nan'))
+            # Pivots can be zero, doesn't matter as NaN factors will propagate
+            self.basis_pivots_cpu[idx].zero_()
 
-            # 3. Cache the bounds for the basic variables
-            lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
-            self.basis_lb_cpu[idx].copy_(torch.from_numpy(lb_B))
-            self.basis_ub_cpu[idx].copy_(torch.from_numpy(ub_B))
+        # 3. Cache the bounds for the basic variables
+        lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
+        self.basis_lb_cpu[idx].copy_(torch.from_numpy(lb_B))
+        self.basis_ub_cpu[idx].copy_(torch.from_numpy(ub_B))
 
-            # 4. Cache the contribution from non-basic variables (N @ z_N)
-            non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
-            self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
+        # 4. Cache the contribution from non-basic variables (N @ z_N)
+        non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
+        self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
 
-            # --- LRU bookkeeping ---
-            # Update LRU manager and index map
-            self.lru_manager[current_hash] = idx
-            self.index_to_hash_map[idx] = current_hash
+        # --- LRU bookkeeping ---
+        # Update LRU manager and index map
+        self.lru_manager[current_hash] = idx
+        self.index_to_hash_map[idx] = current_hash
 
-            # Keep track of the number of stored solutions
-            self.num_pi = len(self.lru_manager)  # Update the count of stored solutions
+        # Keep track of the number of stored solutions
+        self.num_pi = len(self.lru_manager)  # Update the count of stored solutions
 
-            # --- Critical Section End ---
-            return True
+        return True
         
     def update_lru_on_access(self, best_k_index: np.ndarray) -> None:
         """
@@ -406,15 +395,14 @@ class ArgmaxOperation:
         # Pair indices with their counts and sort by count in ascending order
         sorted_by_count = sorted(zip(unique_indices, counts), key=lambda item: item[1])
 
-        with self._lock:
-            # Touch items in the LRU cache in ascending order of frequency
-            for index, _ in sorted_by_count:
-                # The index must be converted to a Python int for dictionary key lookup
-                py_index = int(index)
-                if py_index in self.index_to_hash_map:
-                    basis_hash = self.index_to_hash_map[py_index]
-                    # Accessing the item marks it as recently used
-                    _ = self.lru_manager[basis_hash]
+        # Touch items in the LRU cache in ascending order of frequency
+        for index, _ in sorted_by_count:
+            # The index must be converted to a Python int for dictionary key lookup
+            py_index = int(index)
+            if py_index in self.index_to_hash_map:
+                basis_hash = self.index_to_hash_map[py_index]
+                # Accessing the item marks it as recently used
+                _ = self.lru_manager[basis_hash]
 
 
     def add_scenarios(self, new_short_r_delta: np.ndarray) -> bool:
@@ -459,220 +447,6 @@ class ArgmaxOperation:
         self.num_scenarios += num_to_add
         return True
 
-    def find_optimal_basis(self, x: np.ndarray, touch_lru: bool = True, primal_feas_tol: float = 1e-5) -> None:
-        """
-        Finds the best, preferrably primally feasible dual solution for each scenario.
-
-        This method integrates score calculation with a robust feasibility check:
-        1.  Computes scores for all dual solutions against all scenarios.
-        2.  For each scenario, it identifies the top `NUM_CANDIDATES` solutions.
-        3.  It then performs a batched primal feasibility check on these candidates.
-        4.  The final winner is the highest-scoring candidate that is confirmed
-            to be primally feasible.
-        5.  If no candidates are feasible, it defaults to the top-scoring one.
-
-        The results (indices and scores) are stored on the device.
-
-        Args:
-            x: The first-stage decision vector (NumPy array, size X_DIM).
-            touch_lru: Whether to update the LRU cache for the winning solutions.
-            primal_feas_tol: The tolerance for checking feasibility bounds.
-        """
-        if self.num_pi == 0:
-            print("Warning: No pi vectors stored. Cannot find optimal basis.")
-            return
-        if self.num_scenarios == 0:
-            print("Warning: No scenarios stored. Cannot find optimal basis.")
-            return
-        if x.shape != (self.X_DIM,):
-            raise ValueError("Input x has incorrect shape.")
-
-        with torch.no_grad():
-            # # Initialize memory monitoring
-            # monitor = MemoryMonitor(self.device)
-            # monitor.set_baseline("find_optimal_basis_start")
-            
-            # --- Prepare device data views ---
-            active_pi_gpu = self.pi_gpu[:self.num_pi]  # shape: (num_pi, NUM_STAGE2_ROWS)
-            active_rc_gpu = self.rc_gpu[:self.num_pi]  # shape: (num_pi, NUM_BOUNDED_VARS)
-            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]  # shape: (num_pi, short_delta_r_dim)
-            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :]  # shape: (num_scenarios, short_delta_r_dim)
-
-            self.current_x_gpu.copy_(torch.from_numpy(x))  # shape: (X_DIM,)
-
-            # --- Precompute terms constant across ALL scenarios ---
-            Cx_gpu = torch.matmul(self.C_gpu, self.current_x_gpu)  # shape: (NUM_STAGE2_ROWS,)
-            h_bar_gpu = self.r_bar_gpu - Cx_gpu  # shape: (NUM_STAGE2_ROWS,)
-            pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu)  # shape: (num_pi,)
-            
-            lambda_all_k = torch.clamp(active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
-            mu_all_k = torch.clamp(-active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
-            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32)  # shape: (num_pi,)
-            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)  # shape: (num_pi,)
-            constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k  # shape: (num_pi,)
-
-            # --- Pre-allocate expanded tensors once to avoid per-iteration allocation ---
-            max_candidates_per_batch = self.scenario_batch_size * min(self.NUM_CANDIDATES, self.num_pi)
-            expanded_factors = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                                         dtype=self.basis_factors_cpu.dtype, device=self.device)
-            expanded_pivots = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-                                        dtype=self.basis_pivots_cpu.dtype, device=self.device)
-            expanded_lb = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-                                    dtype=self.basis_lb_cpu.dtype, device=self.device)
-            expanded_ub = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-                                    dtype=self.basis_ub_cpu.dtype, device=self.device)
-            expanded_non_basic_contrib = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-                                                   dtype=self.non_basic_contribution_cpu.dtype, device=self.device)
-            
-            # Pre-allocate all intermediate matrices to eliminate per-iteration allocation
-            optimality_dtype = self.basis_factors_cpu.dtype
-            delta_r_candidates = torch.zeros((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-            repeated_delta_r = torch.empty((max_candidates_per_batch, self.short_delta_r_gpu.shape[1]), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, short_delta_r_dim)
-            rhs_candidates = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-            solution_z_B = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS, 1), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS, 1)
-            feasible = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=torch.bool, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
-
-            # --- Process scenarios in batches ---
-            # monitor.measure("after_preprocessing")
-            num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
-            for i in range(num_batches):
-                # batch_label = f"batch_{i+1}_of_{num_batches}"
-                # monitor.measure(f"{batch_label}_start")
-                
-                # print("batch", i+1, "of", num_batches, flush=True)
-                start_idx = i * self.scenario_batch_size
-                end_idx = min((i + 1) * self.scenario_batch_size, self.num_scenarios)
-                batch_size = end_idx - start_idx
-                
-                # --- Step 1: Calculate Scores ---
-                batch_scenario_slice = active_scenario_data_gpu[start_idx:end_idx, :]  # shape: (batch_size, short_delta_r_dim)
-                scores_batch = self._compute_scores_batch_core(batch_scenario_slice, active_short_pi_gpu, constant_score_part_all_k)
-                
-                # --- Step 2: Find Top Candidates ---
-                effective_k = min(self.NUM_CANDIDATES, self.num_pi)
-                top_k_scores, top_k_indices = torch.topk(scores_batch, k=effective_k, dim=1)  # shapes: (batch_size, effective_k)
-
-                # --- Step 3 & 4: Batched Feasibility Check ---
-                # Flatten the workload: (batch_size, k) -> (batch_size * k)
-                candidate_indices_flat = top_k_indices.flatten()  # shape: (batch_size * effective_k,)
-
-                # Gather basis data from CPU cache
-                if self.device.type == 'cuda':
-                    unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat, return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
-                    unique_candidate_indices_cpu = unique_candidate_indices.cpu()
-                else:
-                    unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat, return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
-                    unique_candidate_indices_cpu = unique_candidate_indices
-                
-                factors_batch_cpu = self.basis_factors_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                pivots_batch_cpu = self.basis_pivots_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                lb_batch_cpu = self.basis_lb_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                ub_batch_cpu = self.basis_ub_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                non_basic_contrib_cpu = self.non_basic_contribution_cpu[unique_candidate_indices_cpu]  # shape: (n_unique, NUM_STAGE2_ROWS)
-                
-                # Move data to GPU and expand to match the flattened workload
-                if self.device.type == 'cuda':
-                    factors_gpu = factors_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                    pivots_gpu = pivots_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    lb_gpu = lb_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    ub_gpu = ub_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    non_basic_contrib_gpu = non_basic_contrib_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    inverse_map_gpu = inverse_map  # Already on GPU device
-                else:
-                    # On CPU, avoid unnecessary copying
-                    factors_gpu = factors_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                    pivots_gpu = pivots_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    lb_gpu = lb_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    ub_gpu = ub_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    non_basic_contrib_gpu = non_basic_contrib_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
-                    inverse_map_gpu = inverse_map  # shape: (batch_size * effective_k,)
-
-                # Use slices of pre-allocated tensors and populate with index_select (avoids allocation)
-                total_candidates = batch_size * effective_k
-                expanded_factors_slice = expanded_factors[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
-                expanded_pivots_slice = expanded_pivots[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                expanded_lb_slice = expanded_lb[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                expanded_ub_slice = expanded_ub[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                expanded_non_basic_contrib_slice = expanded_non_basic_contrib[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                
-                torch.index_select(factors_gpu, 0, inverse_map_gpu, out=expanded_factors_slice)
-                torch.index_select(pivots_gpu, 0, inverse_map_gpu, out=expanded_pivots_slice)
-                torch.index_select(lb_gpu, 0, inverse_map_gpu, out=expanded_lb_slice)
-                torch.index_select(ub_gpu, 0, inverse_map_gpu, out=expanded_ub_slice)
-                torch.index_select(non_basic_contrib_gpu, 0, inverse_map_gpu, out=expanded_non_basic_contrib_slice)
-
-                # Use slices of pre-allocated intermediate matrices (eliminates per-iteration allocation)
-                delta_r_candidates_slice = delta_r_candidates[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                repeated_delta_r_slice = repeated_delta_r[:total_candidates]  # shape: (total_candidates, short_delta_r_dim)
-                rhs_candidates_slice = rhs_candidates[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                solution_z_B_slice = solution_z_B[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS, 1)
-                feasible_slice = feasible[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                
-                # Clear delta_r_candidates slice (reuse zeros tensor)
-                delta_r_candidates_slice.zero_()
-                
-                # Populate repeated_delta_r slice using tensor views (zero allocation)
-                batch_scenario_optimality = batch_scenario_slice.to(optimality_dtype)  # shape: (batch_size, short_delta_r_dim)
-                # Reshape slice to (batch_size, effective_k, short_delta_r_dim) then copy batch data to each k
-                repeated_view = repeated_delta_r_slice[:total_candidates].view(batch_size, effective_k, -1)  # shape: (batch_size, effective_k, short_delta_r_dim)
-                repeated_view.copy_(batch_scenario_optimality.unsqueeze(1).expand(-1, effective_k, -1))  # broadcast across k dimension
-                
-                # Use index_add_ for sparse-to-dense conversion
-                delta_r_candidates_slice.index_add_(1, self.r_sparse_indices_gpu, repeated_delta_r_slice)  # delta_r_candidates_slice shape: (total_candidates, NUM_STAGE2_ROWS)
-                
-                # Assemble RHS (reuse pre-allocated tensor)
-                h_bar_optimality = h_bar_gpu.to(optimality_dtype)  # shape: (NUM_STAGE2_ROWS,)
-                rhs_candidates_slice.copy_(h_bar_optimality.unsqueeze(0).expand(total_candidates, -1))  # broadcast to all candidates
-                rhs_candidates_slice.add_(delta_r_candidates_slice).sub_(expanded_non_basic_contrib_slice)  # shape: (total_candidates, NUM_STAGE2_ROWS)
-
-                # Solve all systems in one go (device-conditional approach)
-                # monitor.measure(f"{batch_label}_before_lu_solve")
-                torch.linalg.lu_solve(expanded_factors_slice, expanded_pivots_slice, 
-                                    rhs_candidates_slice.unsqueeze(-1), out=solution_z_B_slice)
-                # monitor.measure(f"{batch_label}_after_lu_solve")
-
-                # Create 2D view for feasibility check (zero-cost view)
-                solution_z_B_2D = solution_z_B_slice.squeeze(-1)  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                
-                # Check feasibility (reuse pre-allocated tensor)
-                feasible_slice.copy_((solution_z_B_2D >= expanded_lb_slice - primal_feas_tol) & (solution_z_B_2D <= expanded_ub_slice + primal_feas_tol))  # shape: (total_candidates, NUM_STAGE2_ROWS)
-                is_feasible_flat = torch.all(feasible_slice, dim=1)  # shape: (total_candidates,)
-                
-                # --- Step 5: Select the First Valid Winner ---
-                is_feasible_batch = is_feasible_flat.view(batch_size, effective_k)  # shape: (batch_size, effective_k)
-                
-                # For each row, find the index of the first 'True'. If all are 'False', argmax returns 0.
-                first_feasible_idx = torch.argmax(is_feasible_batch.int(), dim=1)  # shape: (batch_size,)
-
-                # Gather the final winning indices and scores
-                best_k_index_batch = top_k_indices.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)  # shape: (batch_size,)
-                best_k_scores_batch = top_k_scores.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)  # shape: (batch_size,)
-
-                # Store the boolean feasibility status of the chosen winner
-                final_optimality_status = is_feasible_batch.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)
-                self.is_verified_optimal_gpu[start_idx:end_idx] = final_optimality_status
-
-                self.best_k_indices_gpu[start_idx:end_idx] = best_k_index_batch
-                self.best_k_scores_gpu[start_idx:end_idx] = best_k_scores_batch
-
-                # Clean up temporary tensors to prevent memory leaks
-                del factors_gpu, pivots_gpu, lb_gpu, ub_gpu, non_basic_contrib_gpu
-                del factors_batch_cpu, pivots_batch_cpu, lb_batch_cpu, ub_batch_cpu, non_basic_contrib_cpu  
-                del unique_candidate_indices, inverse_map, inverse_map_gpu
-                if self.device.type == 'cuda':
-                    del unique_candidate_indices_cpu
-                    # torch.cuda.empty_cache()  # Force PyTorch to release cached GPU memory
-                
-                # monitor.measure(f"{batch_label}_after_cleanup")
-            
-            # # Final memory summary
-            # monitor.measure("all_batches_complete")
-            # print("\n=== BATCH MEMORY MONITORING SUMMARY ===")
-            # monitor.print_summary()
-
-        if touch_lru:
-            best_k_indices_cpu = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
-            self.update_lru_on_access(best_k_indices_cpu)
 
     def _compute_scores_batch_core(self, batch_scenario_slice: torch.Tensor, 
                                    active_short_pi_gpu: torch.Tensor, 
@@ -692,7 +466,7 @@ class ArgmaxOperation:
         scores_batch += constant_score_part_all_k  # In-place addition, shape: (batch_size, num_pi)
         return scores_batch
 
-    def find_optimal_basis_fast(self, x: np.ndarray, touch_lru: bool = True) -> None:
+    def find_optimal_basis_fast(self, x: np.ndarray, touch_lru: bool = True) -> np.ndarray:
         """
         Fast argmax operation without top-k candidates or feasibility checking.
         Computes only the best-scoring dual solution for each scenario.
@@ -703,15 +477,19 @@ class ArgmaxOperation:
         Args:
             x: The first-stage decision vector (NumPy array, size X_DIM).
             touch_lru: Whether to update the LRU cache for the winning solutions.
+            
+        Returns:
+            pi_indices: Array of shape (num_scenarios,) containing the index of the 
+                       best dual solution for each scenario.
         """
         if self.num_pi == 0:
-            print("Warning: No pi vectors stored. Cannot find optimal basis.")
-            return
+            raise RuntimeError("No pi vectors stored. Cannot find optimal basis.")
         if self.num_scenarios == 0:
-            print("Warning: No scenarios stored. Cannot find optimal basis.")
-            return
+            raise RuntimeError("No scenarios stored. Cannot find optimal basis.")
         if x.shape != (self.X_DIM,):
             raise ValueError("Input x has incorrect shape.")
+
+        pi_indices = np.zeros(self.num_scenarios, dtype=np.int64)
 
         with torch.no_grad():
             # --- Prepare device data views ---
@@ -749,15 +527,12 @@ class ArgmaxOperation:
                 best_scores_batch, best_indices_batch = torch.max(scores_batch, dim=1)  # shapes: (batch_size,)
                 
                 # --- Store Results ---
-                self.best_k_indices_gpu[start_idx:end_idx] = best_indices_batch
-                self.best_k_scores_gpu[start_idx:end_idx] = best_scores_batch
-                
-                # All scenarios are considered "optimal" in fast mode (no feasibility check)
-                self.is_verified_optimal_gpu[start_idx:end_idx] = True
+                pi_indices[start_idx:end_idx] = best_indices_batch.cpu().numpy()
 
         if touch_lru:
-            best_k_indices_cpu = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
-            self.update_lru_on_access(best_k_indices_cpu)
+            self.update_lru_on_access(pi_indices)
+
+        return pi_indices
 
     def find_optimal_basis_with_subset(self, x: np.ndarray, scenario_indices: np.ndarray, 
                                        touch_lru: bool = True, primal_feas_tol: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -773,9 +548,9 @@ class ArgmaxOperation:
             
         Returns:
             A tuple containing:
-            - best_k_scores: The scores of the best dual for each selected scenario
-            - best_k_indices: The indices of the best dual for each selected scenario  
-            - is_optimal: Boolean array indicating feasibility for each selected scenario
+            - best_k_scores: The scores of the best dual for each processed scenario
+            - best_k_indices: The indices of the best dual for each processed scenario  
+            - is_optimal: Boolean array indicating feasibility for each processed scenario
         """
         if self.num_pi == 0:
             print("Warning: No pi vectors stored. Cannot find optimal basis.")
@@ -790,7 +565,9 @@ class ArgmaxOperation:
         if np.any(scenario_indices < 0) or np.any(scenario_indices >= self.num_scenarios):
             raise ValueError("scenario_indices contains out-of-bounds values.")
 
-        num_selected_scenarios = len(scenario_indices)
+        # For now, process all scenarios (filtering can be added later when we have optimal scenario tracking)
+        scenario_indices_to_process = scenario_indices.copy()
+        num_selected_scenarios = len(scenario_indices_to_process)
         
         # Pre-allocate result arrays for selected scenarios
         selected_best_scores = np.zeros(num_selected_scenarios, dtype=np.float32)
@@ -847,7 +624,7 @@ class ArgmaxOperation:
                 batch_size = batch_end - batch_start
                 
                 # Get scenario indices for this batch
-                current_batch_scenario_indices = scenario_indices[batch_start:batch_end]
+                current_batch_scenario_indices = scenario_indices_to_process[batch_start:batch_end]
                 
                 # Extract scenario data for current batch
                 batch_scenario_slice = self.short_delta_r_gpu[current_batch_scenario_indices, :]  # shape: (batch_size, short_delta_r_dim)
@@ -968,75 +745,36 @@ class ArgmaxOperation:
 
         return selected_best_scores, selected_best_indices, selected_is_optimal
 
-    def calculate_cut_coefficients(self,
-                               override_indices: Optional[np.ndarray] = None,
-                               override_pi: Optional[np.ndarray] = None,
-                               override_rc: Optional[np.ndarray] = None) -> Optional[Tuple[float, np.ndarray]]:
+    def calculate_cut_coefficients(self, pi_indices: np.ndarray) -> Tuple[float, np.ndarray]:
         """
-        Calculates Benders cut coefficients (alpha, beta) using pre-computed
-        best_k_indices from `find_optimal_basis`. Allows for temporary, non-destructive
-        overwriting of pi and rc values for a subset of scenarios.
-
+        Calculates Benders cut coefficients (alpha, beta) using provided pi indices array.
+        
         Args:
-            override_indices: Optional. 1D NumPy array of scenario indices to override.
-            override_pi: Optional. 2D NumPy array of new pi vectors for the override indices.
-            override_rc: Optional. 2D NumPy array of new rc vectors for the override indices.
-
+            pi_indices: Array of shape (num_scenarios,) containing the index of the 
+                       dual solution to use for each scenario.
+                       
         Returns:
-            A tuple (alpha, beta) or None if `find_optimal_basis` has not been run.
+            A tuple (alpha, beta):
             - alpha (float): Constant term of the Benders cut (float64).
             - beta (np.ndarray): Coefficient vector of the cut (float64, size X_DIM).
         """
-        if self.best_k_indices_gpu is None:
-            print("Error: `find_optimal_basis` must be run before calculating coefficients.")
-            return None
-
-        # --- Input Validation for Overrides ---
-        has_override = override_indices is not None
-        if has_override:
-            if not (override_pi is not None and override_rc is not None):
-                raise ValueError("If overriding, all three must be provided: override_indices, override_pi, override_rc.")
-            if not (override_indices.ndim == 1 and override_pi.ndim == 2 and override_rc.ndim == 2):
-                raise ValueError("Override arrays have incorrect dimensions.")
-            num_overrides = len(override_indices)
-            if not (override_pi.shape == (num_overrides, self.NUM_STAGE2_ROWS) and override_rc.shape == (num_overrides, self.NUM_BOUNDED_VARS)):
-                raise ValueError("Shape mismatch in override_pi or override_rc.")
-            if np.any(override_indices < 0) or np.any(override_indices >= self.num_scenarios):
-                raise ValueError("override_indices contains out-of-bounds values.")
+        if pi_indices.shape != (self.num_scenarios,):
+            raise ValueError(f"pi_indices must have shape ({self.num_scenarios},), got {pi_indices.shape}")
+        if np.any(pi_indices < 0) or np.any(pi_indices >= self.num_pi):
+            raise ValueError("pi_indices contains out-of-bounds values.")
 
         with torch.no_grad():
             active_pi_gpu = self.pi_gpu[:self.num_pi]
             active_rc_gpu = self.rc_gpu[:self.num_pi]
             active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]
-            best_k_indices_slice = self.best_k_indices_gpu[:self.num_scenarios]
+            pi_indices_gpu = torch.from_numpy(pi_indices).to(self.device, dtype=torch.long)
 
-            # --- Select pi, rc, and short_pi based on best_k_indices ---
-            selected_pi = active_pi_gpu[best_k_indices_slice]
-            selected_rc = active_rc_gpu[best_k_indices_slice]
-            selected_short_pi = active_short_pi_gpu[best_k_indices_slice]
+            # --- Select pi, rc, and short_pi based on pi_indices ---
+            selected_pi = active_pi_gpu[pi_indices_gpu]
+            selected_rc = active_rc_gpu[pi_indices_gpu]
+            selected_short_pi = active_short_pi_gpu[pi_indices_gpu]
 
-            # --- Apply Overrides (Non-Destructive) ---
-            if has_override:
-                # Clone tensors to avoid modifying the original data
-                selected_pi = selected_pi.clone()
-                selected_rc = selected_rc.clone()
-                selected_short_pi = selected_short_pi.clone()
-
-                # Transfer override data to GPU
-                override_indices_gpu = torch.from_numpy(override_indices).to(self.device, dtype=torch.long)
-                override_pi_gpu = torch.from_numpy(override_pi).to(self.device, dtype=selected_pi.dtype)
-                override_rc_gpu = torch.from_numpy(override_rc).to(self.device, dtype=selected_rc.dtype)
-
-                # Scatter new values into the cloned tensors
-                selected_pi[override_indices_gpu] = override_pi_gpu
-                selected_rc[override_indices_gpu] = override_rc_gpu
-
-                # Update the corresponding short_pi values
-                if self.R_SPARSE_LEN > 0:
-                    override_short_pi_gpu = override_pi_gpu[:, self.r_sparse_indices_gpu]
-                    selected_short_pi[override_indices_gpu] = override_short_pi_gpu
-
-            # --- Calculate lambda and mu from the (potentially overridden) rc ---
+            # --- Calculate lambda and mu from rc ---
             selected_lambda = torch.clamp(selected_rc, min=0)
             selected_mu = torch.clamp(-selected_rc, min=0)
 
@@ -1073,25 +811,6 @@ class ArgmaxOperation:
 
             return alpha, beta
 
-    def get_best_k_results(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """
-        Retrieves the best_k scores, indices, and optimality status from the device.
-
-        Returns:
-            A tuple (scores, indices, is_optimal) as NumPy arrays, or None if not computed.
-            - scores: The objective score of the selected basis for each scenario.
-            - indices: The index of the selected basis for each scenario.
-            - is_optimal: A boolean array indicating if the selected basis was verified as feasible.
-        """
-        # The user is responsible for ensuring that `find_optimal_basis` has been called
-        # and that the input `x` has not changed since the last call.
-        
-        # Truncate the results to the actual number of scenarios processed.
-        scores_np = self.best_k_scores_gpu[:self.num_scenarios].cpu().numpy()
-        indices_np = self.best_k_indices_gpu[:self.num_scenarios].cpu().numpy()
-        is_optimal_np = self.is_verified_optimal_gpu[:self.num_scenarios].cpu().numpy()
-        
-        return scores_np, indices_np, is_optimal_np
 
     # --- Basis Matrix Related Methods for Optimality Checking ---
     def _get_basis_matrix(self, vbasis: np.ndarray, cbasis: np.ndarray) -> scipy.sparse.spmatrix:

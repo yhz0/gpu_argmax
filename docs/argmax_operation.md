@@ -1,8 +1,8 @@
-## Mathematical Basis of the Argmax Calculation in `ArgmaxOperation`
+## Mathematical Basis and API of the `ArgmaxOperation` Class
 
 ### 1. Context: Benders Decomposition and Dual Solutions
 
-The `ArgmaxOperation` class is designed to facilitate algorithms like Benders decomposition for two-stage stochastic linear programs. A key step in Benders is generating optimality cuts based on solutions to the second-stage dual problem.
+The `ArgmaxOperation` class is designed to facilitate Benders decomposition for two-stage stochastic linear programs. A key step in Benders is generating optimality cuts based on solutions to the second-stage dual problem.
 
 The second-stage primal problem is:
 $Q(x, \omega) = \min_{y} \quad d^T y$
@@ -23,53 +23,172 @@ Here:
 
 We know that $\lambda_j = \max(0, RC_j)$ and $\mu_j = \max(0, -RC_j)$, where $RC_j$ is the reduced cost for variable $y_j$.
 
-### 2. Candidate Dual Solutions
+### 2. Core Functionality
 
-The `ArgmaxOperation` class stores a set of candidate dual solutions obtained from previous iterations or subproblem solves. In the current design, each stored solution `k` consists of the constraint duals $\pi_k$ and the reduced costs $RC_k$. From $RC_k$, we can derive the corresponding bound duals $\lambda_k$ and $\mu_k$.
+The `ArgmaxOperation` class provides GPU-accelerated storage and querying of dual solutions with the following key features:
 
-### 3. The Refactored API: A Two-Step Process
+* **Dual Solution Storage**: Stores constraint duals ($\pi$) and reduced costs ($RC$) on GPU device
+* **Basis Information**: Stores variable and constraint basis status on CPU for LP warmstarting
+* **Scenario Management**: Handles stochastic RHS variations efficiently
+* **Optimality Checking**: Performs feasibility verification using basis factorization
+* **Deduplication**: Avoids storing duplicate basis pairs using hash-based LRU cache
 
-The calculation of Benders cuts has been refactored into a two-step process to separate the computationally intensive search for the best duals from the final coefficient calculation.
+### 3. Data Organization
 
-#### Step 1: `find_optimal_basis(x)` - Finding the Best Dual Solution
+#### Storage Layout
+- **GPU Storage**: Dual vectors ($\pi$, $RC$), scenario data ($\delta r$), computation matrices
+- **CPU Storage**: Basis status arrays, LU factorization data, variable bounds
+- **Hybrid Approach**: Optimizes memory bandwidth and computational efficiency
 
-The `find_optimal_basis(x)` method is the core of the operation. For a given first-stage decision vector `x`, it calculates a "score" for each scenario $\omega_i$ and each stored candidate dual solution `k`. This score is the objective function value of the dual problem:
+#### Key Dimensions
+- `MAX_PI`: Maximum number of dual solutions to store
+- `MAX_OMEGA`: Maximum number of scenarios
+- `NUM_CANDIDATES`: Number of top candidates for feasibility checking
 
-`Score(k, i) = \pi_k^T (r(\omega_i) - Cx) - \lambda_k^T l + \mu_k^T u`
+### 4. Main API Methods
 
-The method then performs an `argmax` operation for each scenario to find the index `k*` of the dual solution that maximizes this score. The primary purpose of this step is:
+The class provides two primary operation modes:
 
-*   **Finding the Tightest Bound:** By maximizing the dual objective over the set of stored candidates, we find the tightest possible lower bound on the true second-stage cost $Q(x, \omega_i)$ for each scenario.
-*   **Identifying the Most Relevant Cut:** The dual solution `k*` that maximizes the score is considered the most "active" or "relevant" for that specific scenario and first-stage decision.
+#### 4.1. Fast Mode: `find_optimal_basis_fast(x)`
 
-The results of this operation (the best indices `k*` and the corresponding maximum scores) are stored internally on the GPU.
+**Purpose**: High-speed argmax operation for cut generation.
 
-#### Step 2: `calculate_cut_coefficients()` - Aggregating Results
+**Process**:
+1. For each scenario $\omega_i$, calculates score for each stored dual solution $k$:
+   ```
+   Score(k, i) = \pi_k^T (r(\omega_i) - Cx) - \lambda_k^T l + \mu_k^T u
+   ```
+2. Returns `pi_indices` array where `pi_indices[i]` is the index of the best dual for scenario $i$
 
-Once `find_optimal_basis(x)` has been run, the `calculate_cut_coefficients()` method can be called. This method uses the stored `best_k_indices` to:
-
-1.  Gather the corresponding dual vectors ($\pi_{k^*}, \lambda_{k^*}, \mu_{k^*}$) for each scenario.
-2.  Calculate the average of these vectors across all scenarios.
-3.  Use these averaged vectors to compute the final Benders cut coefficients, `alpha` and `beta`.
-
-This separation ensures that the expensive `argmax` search is performed only once per `x` vector, and the final coefficients can be retrieved efficiently afterward.
-
-### 4. Usage Example
-
-The new API is used as follows:
-
+**Usage**:
 ```python
-# Assume argmax_op is an initialized ArgmaxOperation instance
-# and x is the first-stage decision vector.
-
-# 1. Perform the expensive search for the best duals for each scenario.
-#    This stores the results internally.
-argmax_op.find_optimal_basis(x)
-
-# 2. Calculate the final Benders cut coefficients based on the stored results.
-alpha, beta = argmax_op.calculate_cut_coefficients()
-
-# 3. (Optional) Retrieve the detailed results for analysis.
-scores, indices, is_optimal = argmax_op.get_best_k_results()
+# Fast argmax for all scenarios
+pi_indices = argmax_op.find_optimal_basis_fast(x)
+alpha, beta = argmax_op.calculate_cut_coefficients(pi_indices)
 ```
-In essence, the `find_optimal_basis` method identifies which of the previously generated dual solutions is most "binding" for each scenario, and `calculate_cut_coefficients` aggregates this information to form a single, valid Benders optimality cut.
+
+**Characteristics**:
+- No feasibility checking
+- Processes all scenarios
+- Optimized for pure cut generation
+- Updates LRU cache for winning solutions
+
+#### 4.2. Subset Mode: `find_optimal_basis_with_subset(x, scenario_indices)`
+
+**Purpose**: Detailed analysis of specific scenarios with feasibility verification.
+
+**Process**:
+1. Operates only on specified `scenario_indices`
+2. Finds top-k candidate duals for each scenario
+3. Performs basis factorization and feasibility checking
+4. Returns first feasible solution for each scenario
+
+**Returns**:
+- `best_scores`: Objective values of selected duals
+- `best_indices`: Indices of selected dual solutions  
+- `is_optimal`: Boolean feasibility status for each scenario
+
+**Usage**:
+```python
+# Subset processing with feasibility checking
+selected_scenarios = np.array([0, 5, 10, 15])
+scores, indices, is_optimal = argmax_op.find_optimal_basis_with_subset(x, selected_scenarios)
+vbasis, cbasis = argmax_op.get_basis(indices)  # For LP solver warmstart
+```
+
+**Characteristics**:
+- Top-k candidate evaluation
+- Rigorous feasibility verification via LU solve
+- Supports LP solver warmstarting
+- More computationally intensive
+
+#### 4.3. Cut Coefficient Calculation: `calculate_cut_coefficients(pi_indices)`
+
+**Purpose**: Generate Benders cut coefficients from specified dual solutions.
+
+**Process**:
+1. Takes explicit `pi_indices` array (from either method above)
+2. Gathers corresponding ($\pi_{k^*}$, $\lambda_{k^*}$, $\mu_{k^*}$) for each scenario
+3. Computes scenario-weighted averages using float64 precision
+4. Returns cut coefficients $(\alpha, \beta)$
+
+**Mathematical Formula**:
+```
+α = E[\pi_{k^*}^T \bar{r}] + E[\pi_{k^*}^T \delta r_i] - E[\lambda_{k^*}^T l] + E[\mu_{k^*}^T u]
+β = -C^T E[\pi_{k^*}]
+```
+
+### 5. Typical Usage Patterns
+
+#### Pattern 1: Pure Cut Generation
+```python
+# Fast mode for generating Benders cuts
+pi_indices = argmax_op.find_optimal_basis_fast(x_candidate)
+alpha, beta = argmax_op.calculate_cut_coefficients(pi_indices)
+
+# Add cut to master problem
+if alpha + beta @ x_candidate > current_eta + tolerance:
+    master_problem.add_optimality_cut(beta, alpha)
+```
+
+#### Pattern 2: LP Solver Warmstarting
+```python
+# Select scenarios for LP solving
+selected_scenarios = select_scenarios_for_lp(iteration)
+
+# Get warmstart basis
+scores, indices, is_optimal = argmax_op.find_optimal_basis_with_subset(x, selected_scenarios)
+vbasis_batch, cbasis_batch = argmax_op.get_basis(indices)
+
+# Solve subproblems with warmstart
+results = parallel_worker.solve_batch(x, scenarios, vbasis_batch, cbasis_batch)
+```
+
+#### Pattern 3: Hybrid Approach
+```python
+# Use subset mode for warmstarting selected scenarios
+warmstart_scores, warmstart_indices, is_optimal = \
+    argmax_op.find_optimal_basis_with_subset(x, selected_scenarios)
+vbasis, cbasis = argmax_op.get_basis(warmstart_indices)
+
+# Solve subproblems and add new duals
+subproblem_results = solve_subproblems(x, selected_scenarios, vbasis, cbasis)
+for i, (pi, rc, vb, cb) in enumerate(subproblem_results):
+    argmax_op.add_pi(pi, rc, vb, cb)
+
+# Generate cut using fast mode on ALL scenarios  
+pi_indices_all = argmax_op.find_optimal_basis_fast(x)
+alpha, beta = argmax_op.calculate_cut_coefficients(pi_indices_all)
+```
+
+### 6. Key Features and Optimizations
+
+#### Performance Features
+- **GPU Acceleration**: Core computations on CUDA devices
+- **Batched Processing**: Efficient handling of large scenario sets
+- **Memory Efficiency**: Hybrid CPU/GPU storage strategy
+- **Sparse Matrix Support**: Optimized handling of technology matrix $C$
+
+#### Robustness Features  
+- **Basis Deduplication**: Hash-based LRU cache prevents duplicate storage
+- **Numerical Precision**: Float64 for cut coefficient calculations
+- **Feasibility Verification**: Rigorous optimality checking via basis factorization
+- **Error Handling**: Graceful handling of singular basis matrices
+
+#### Flexibility Features
+- **Scenario Subsetting**: Process arbitrary scenario subsets
+- **Multiple Precision**: Configurable dtype for optimality checking
+- **Device Agnostic**: Supports both CPU and CUDA devices
+- **Thread Safe**: Concurrent access protection for dual addition
+
+### 7. Integration with Benders Solvers
+
+The `ArgmaxOperation` class integrates seamlessly with Benders decomposition algorithms:
+
+1. **Initialization**: Created from `SMPSReader` with problem-specific dimensions
+2. **Dual Accumulation**: New dual solutions added via `add_pi()` throughout iterations
+3. **Cut Generation**: Fast mode provides efficient cut coefficient calculation
+4. **Warmstarting**: Subset mode enables LP solver acceleration
+5. **Memory Management**: LRU eviction maintains bounded memory usage
+
+This design separates the computationally intensive argmax search from coefficient calculation, enabling flexible usage patterns while maintaining high performance.

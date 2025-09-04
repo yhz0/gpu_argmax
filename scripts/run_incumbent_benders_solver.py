@@ -133,9 +133,6 @@ class BendersSolver:
         except Exception as e:
             self.logger.error(f"Error loading initial basis from {h5_path}: {e}", exc_info=True)
             raise # Ensure the error is raised to stop execution if loading fails
-            # num_x_vars = len(self.reader.stage1_var_names)
-            # self.x_init = np.zeros(num_x_vars) 
-            # self.logger.warning(f"Defaulting x_init to zeros due to HDF5 loading error.")
         
         if self.x_init is None or self.x_init.shape[0] != self.c_vector.shape[0]:
             self.logger.warning(
@@ -146,8 +143,6 @@ class BendersSolver:
         
         self.x_incumbent = self.x_init.copy()
         
-        # Initialize scenario selection state
-        self._scenario_selection_offset = 0  # For systematic rotation
         
         self.logger.info("--- Problem Setup Complete ---")
 
@@ -181,20 +176,20 @@ class BendersSolver:
             - solve_time (float): The execution time.
         """
         start_time = time.time()
-        PRIMAL_FEAS_TOL = self.config.get('primal_feas_tol', 1e-3)
-        self.argmax_op.find_optimal_basis(current_x, primal_feas_tol=PRIMAL_FEAS_TOL)
         
-        cut_info = self.argmax_op.calculate_cut_coefficients()
-
-        if cut_info is None:
-            self.logger.warning("ArgmaxOperation.calculate_cut_coefficients returned None. Argmax cost will be NaN.")
-            argmax_estim_q_x = np.nan
-            best_k_scores, best_k_index, is_optimal = np.array([]), np.array([]), np.array([])
-        else:
-            alpha_pre, beta_pre = cut_info
-            argmax_estim_q_x = alpha_pre + beta_pre @ current_x
-            best_k_scores, best_k_index, is_optimal = self.argmax_op.get_best_k_results()
-
+        # Use fast argmax to get pi indices for all scenarios
+        pi_indices = self.argmax_op.find_optimal_basis_fast(current_x)
+        
+        # Calculate cut coefficients using the pi indices
+        alpha_pre, beta_pre = self.argmax_op.calculate_cut_coefficients(pi_indices)
+        argmax_estim_q_x = alpha_pre + beta_pre @ current_x
+        
+        # For compatibility, return empty arrays for individual scenario results
+        # (the old API provided per-scenario scores, but new API focuses on cut generation)
+        best_k_scores = np.array([])
+        best_k_index = pi_indices  # Return the pi indices used
+        is_optimal = np.array([])  # Fast mode doesn't do feasibility checking
+        
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_scores, best_k_index, is_optimal, solve_time
 
@@ -212,7 +207,7 @@ class BendersSolver:
             A tuple containing results for the solved scenarios.
         """
         start_time = time.time()
-        obj_all, y_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all = \
+        obj_all, _, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all = \
             self.parallel_worker.solve_batch(
                 current_x, self.short_delta_r, vbasis_batch, cbasis_batch,
                 subset_indices=subset_indices
@@ -276,34 +271,22 @@ class BendersSolver:
         update_time = time.time() - start_time
         return coverage_fraction, added_count, update_time
 
-    def _calculate_and_add_cut(self, current_x: np.ndarray, suboptimal_indices: Optional[np.ndarray], pi_suboptimal: Optional[np.ndarray], rc_suboptimal: Optional[np.ndarray]) -> Tuple[float, bool, float]:
+    def _calculate_and_add_cut(self, current_x: np.ndarray, pi_indices: np.ndarray) -> Tuple[float, bool, float]:
         """
-        Calculates a new Benders cut using argmax_op with overrides for suboptimal scenarios
+        Calculates a new Benders cut using argmax_op with provided pi indices
         and adds it to the master problem if violated.
 
         Args:
             current_x: The current first-stage decision vector.
-            suboptimal_indices: Indices of scenarios that were solved via LP.
-            pi_suboptimal: Dual variables for the suboptimal scenarios.
-            rc_suboptimal: Reduced costs for the suboptimal scenarios.
+            pi_indices: Array of pi indices to use for each scenario.
 
         Returns:
             A tuple containing the actual cost, a boolean indicating if a cut was added, and the execution time.
         """
         start_time = time.time()
 
-        # Use the argmax operation with overrides for the suboptimal scenarios
-        cut_info = self.argmax_op.calculate_cut_coefficients(
-            override_indices=suboptimal_indices,
-            override_pi=pi_suboptimal,
-            override_rc=rc_suboptimal
-        )
-
-        if cut_info is None:
-            self.logger.warning("Cannot calculate cut, argmax_op.calculate_cut_coefficients returned None.")
-            return -np.inf, False, time.time() - start_time
-
-        alpha, beta = cut_info
+        # Calculate cut coefficients using provided pi indices
+        alpha, beta = self.argmax_op.calculate_cut_coefficients(pi_indices)
         subproblem_actual_q_x = alpha + beta @ current_x
 
         current_master_epigraph_eta_at_x = self.master_problem.calculate_epigraph_value(current_x)
@@ -334,8 +317,6 @@ class BendersSolver:
         
         if strategy == 'systematic':
             return self._systematic_scenario_selection(iteration, num_lp_scenarios)
-        elif strategy == 'priority':
-            return self._priority_scenario_selection(num_lp_scenarios)
         elif strategy == 'random':
             return self._random_scenario_selection(num_lp_scenarios)
         else:
@@ -380,40 +361,7 @@ class BendersSolver:
         total_scenarios = self.short_delta_r.shape[0]
         return np.random.choice(total_scenarios, size=num_to_select, replace=False)
 
-    def _priority_scenario_selection(self, num_to_select: int) -> np.ndarray:
-        """
-        Select scenarios based on priority (future implementation).
-        Currently falls back to systematic selection.
-        
-        Args:
-            num_to_select: Number of scenarios to select
-            
-        Returns:
-            Array of selected scenario indices
-        """
-        # TODO: Implement priority-based selection using argmax gap or other metrics
-        # For now, use systematic selection as fallback
-        self.logger.debug("Priority-based selection not yet implemented, using systematic selection")
-        return self._systematic_scenario_selection(1, num_to_select)  # Use iteration=1 as default
 
-    def _compute_scenario_priorities(self, current_scores: np.ndarray) -> np.ndarray:
-        """
-        Compute priority scores for scenarios (future implementation).
-        
-        Args:
-            current_scores: Current argmax scores for all scenarios
-            
-        Returns:
-            Priority values for each scenario (higher = more important)
-        """
-        # TODO: Implement various priority metrics:
-        # - Argmax gap (difference between best and second-best dual)
-        # - Time since last LP solve for each scenario
-        # - Score uncertainty or variance
-        # - Problem-specific heuristics
-        
-        # Placeholder: return random priorities
-        return np.random.random(len(current_scores))
 
     def _log_iteration_data(self, iteration_metrics):
         """
@@ -524,20 +472,17 @@ class BendersSolver:
 
             # 6. Fast cut generation: Run argmax (fast mode) on ALL scenarios
             argmax_start_time = time.time()
-            self.argmax_op.find_optimal_basis_fast(self.x_candidate)
+            pi_indices_all_scenarios = self.argmax_op.find_optimal_basis_fast(self.x_candidate)
             argmax_time = time.time() - argmax_start_time
 
             # 7. Calculate cut using pure argmax (no overrides needed)
             subproblem_actual_q_x, cut_added, cut_calc_time = self._calculate_and_add_cut(
-                self.x_candidate, None, None, None
+                self.x_candidate, pi_indices_all_scenarios
             )
             
-            # Get argmax estimation for logging
-            argmax_estim_q_x, _, _ = self.argmax_op.get_best_k_results()
-            if argmax_estim_q_x is not None and len(argmax_estim_q_x) > 0:
-                argmax_estim_q_x = np.mean(argmax_estim_q_x)  # Average score for logging
-            else:
-                argmax_estim_q_x = np.nan
+            # Get argmax estimation for logging (calculate directly from pi_indices)
+            alpha_argmax, beta_argmax = self.argmax_op.calculate_cut_coefficients(pi_indices_all_scenarios)
+            argmax_estim_q_x = alpha_argmax + beta_argmax @ self.x_candidate
             
             actual_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
                               self.master_problem.calculate_estimated_objective(self.x_candidate)

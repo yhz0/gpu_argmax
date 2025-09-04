@@ -136,9 +136,9 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
         self.assertIsNotNone(self.correct_scenario_objective, "Correct objective not calculated.")
 
         print("\nRunning test: Argmax calculation vs Expected objective...")
-        # --- Perform the core calculation using the new two-step API ---
-        self.argmax_op.find_optimal_basis(self.x_sol)
-        alpha, beta = self.argmax_op.calculate_cut_coefficients()
+        # --- Perform the core calculation using the new API ---
+        pi_indices = self.argmax_op.find_optimal_basis_fast(self.x_sol)
+        alpha, beta = self.argmax_op.calculate_cut_coefficients(pi_indices)
         
         # Calculate the estimated objective value: alpha + beta^T * x
         estimated_objective = alpha + beta @ self.x_sol

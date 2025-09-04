@@ -106,11 +106,12 @@ class TestOptimalityCheck(unittest.TestCase):
         for s in range(num_duals_to_add):
             argmax_op.add_pi(self.pi_s[s, :], np.array([]), self.vbasis_y_all[s, :], self.cbasis_y_all[s, :])
 
-        # Step 5: Run argmax procedure
-        argmax_op.find_optimal_basis(self.x_sol, primal_feas_tol=1e-4)
+        # Step 5: Run argmax procedure with optimality checking
+        all_scenario_indices = np.arange(self.num_scenarios)
+        scores, indices, is_optimal = argmax_op.find_optimal_basis_with_subset(
+            self.x_sol, all_scenario_indices, primal_feas_tol=1e-4)
         
         # Step 6: Sanity check the scores of the first 3 scenarios
-        scores, indicies, is_optimal = argmax_op.get_best_k_results()
 
         print("Performing sanity check on first 3 scenarios...")
         np.testing.assert_allclose(
@@ -137,7 +138,7 @@ class TestOptimalityCheck(unittest.TestCase):
         np.testing.assert_array_equal(
             is_optimal,
             ground_truth_optimality,
-            err_msg="Optimality results from find_optimal_basis do not match the ground truth."
+            err_msg="Optimality results from find_optimal_basis_with_subset do not match the ground truth."
         )
         print("All optimality assertions passed.")
         
