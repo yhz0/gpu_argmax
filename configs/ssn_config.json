@@ -21,5 +21,6 @@
     "primal_feas_tol": 1e-2,
     "num_lp_scenarios_per_iteration": 10000,
     "lp_scenario_selection_strategy": "systematic",
+    "num_workers": null,
     "instance_name": "benders_run_ssn"
 }

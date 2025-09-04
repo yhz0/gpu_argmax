@@ -17,5 +17,9 @@
     "num_duals_to_add_per_iteration": 1000,
     "tolerance": 1e2,
     "argmax_tol_cutoff": 1e3,
+    "NUM_CANDIDATES": 8,
+    "num_workers": null,
+    "num_lp_scenarios_per_iteration": 1000,
+    "lp_scenario_selection_strategy": "systematic",
     "instance_name": "benders_run_storm"
 }
