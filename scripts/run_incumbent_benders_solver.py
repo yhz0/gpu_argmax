@@ -264,9 +264,9 @@ class BendersSolver:
         
         added_count = 0
         for s_idx in chosen_indices:
-            # Only add if the difference is larger than the cutoff
-            if scores_difference is not None and scores_difference[s_idx] < ARGMAX_CUTOFF_TOLERANCE:
-                continue
+            # Removed cutoff logic - add all selected duals regardless of score improvement
+            # if scores_difference is not None and scores_difference[s_idx] < ARGMAX_CUTOFF_TOLERANCE:
+            #     continue
             if self.argmax_op.add_pi(pi_all[s_idx], rc_all[s_idx], vbasis_out[s_idx], cbasis_out[s_idx]):
                 added_count += 1
         update_time = time.time() - start_time

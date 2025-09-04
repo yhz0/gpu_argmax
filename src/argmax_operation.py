@@ -479,23 +479,44 @@ class ArgmaxOperation:
 
         with torch.no_grad():
             # --- Prepare device data views ---
-            active_pi_gpu = self.pi_gpu[:self.num_pi]
-            active_rc_gpu = self.rc_gpu[:self.num_pi]
-            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]
-            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :]
+            active_pi_gpu = self.pi_gpu[:self.num_pi]  # shape: (num_pi, NUM_STAGE2_ROWS)
+            active_rc_gpu = self.rc_gpu[:self.num_pi]  # shape: (num_pi, NUM_BOUNDED_VARS)
+            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]  # shape: (num_pi, short_delta_r_dim)
+            active_scenario_data_gpu = self.short_delta_r_gpu[:self.num_scenarios, :]  # shape: (num_scenarios, short_delta_r_dim)
 
-            self.current_x_gpu.copy_(torch.from_numpy(x))
+            self.current_x_gpu.copy_(torch.from_numpy(x))  # shape: (X_DIM,)
 
             # --- Precompute terms constant across ALL scenarios ---
-            Cx_gpu = torch.matmul(self.C_gpu, self.current_x_gpu)
-            h_bar_gpu = self.r_bar_gpu - Cx_gpu
-            pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu)
+            Cx_gpu = torch.matmul(self.C_gpu, self.current_x_gpu)  # shape: (NUM_STAGE2_ROWS,)
+            h_bar_gpu = self.r_bar_gpu - Cx_gpu  # shape: (NUM_STAGE2_ROWS,)
+            pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu)  # shape: (num_pi,)
             
-            lambda_all_k = torch.clamp(active_rc_gpu, min=0)
-            mu_all_k = torch.clamp(-active_rc_gpu, min=0)
-            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32)
-            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)
-            constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k
+            lambda_all_k = torch.clamp(active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
+            mu_all_k = torch.clamp(-active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
+            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32)  # shape: (num_pi,)
+            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)  # shape: (num_pi,)
+            constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k  # shape: (num_pi,)
+
+            # --- Pre-allocate expanded tensors once to avoid per-iteration allocation ---
+            max_candidates_per_batch = self.scenario_batch_size * min(self.NUM_CANDIDATES, self.num_pi)
+            expanded_factors = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                                         dtype=self.basis_factors_cpu.dtype, device=self.device)
+            expanded_pivots = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+                                        dtype=self.basis_pivots_cpu.dtype, device=self.device)
+            expanded_lb = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+                                    dtype=self.basis_lb_cpu.dtype, device=self.device)
+            expanded_ub = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+                                    dtype=self.basis_ub_cpu.dtype, device=self.device)
+            expanded_non_basic_contrib = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS),  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+                                                   dtype=self.non_basic_contribution_cpu.dtype, device=self.device)
+            
+            # Pre-allocate all intermediate matrices to eliminate per-iteration allocation
+            optimality_dtype = self.basis_factors_cpu.dtype
+            delta_r_candidates = torch.zeros((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+            repeated_delta_r = torch.empty((max_candidates_per_batch, self.short_delta_r_gpu.shape[1]), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, short_delta_r_dim)
+            rhs_candidates = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
+            solution_z_B = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS, 1), dtype=optimality_dtype, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS, 1)
+            feasible = torch.empty((max_candidates_per_batch, self.NUM_STAGE2_ROWS), dtype=torch.bool, device=self.device)  # shape: (max_candidates_per_batch, NUM_STAGE2_ROWS)
 
             # --- Process scenarios in batches ---
             num_batches = math.ceil(self.num_scenarios / self.scenario_batch_size)
@@ -505,69 +526,102 @@ class ArgmaxOperation:
                 batch_size = end_idx - start_idx
                 
                 # --- Step 1: Calculate Scores ---
-                batch_scenario_slice = active_scenario_data_gpu[start_idx:end_idx, :]
-                stochastic_score_part_batch = torch.matmul(batch_scenario_slice, active_short_pi_gpu.T)
-                scores_batch = stochastic_score_part_batch + constant_score_part_all_k
+                batch_scenario_slice = active_scenario_data_gpu[start_idx:end_idx, :]  # shape: (batch_size, short_delta_r_dim)
+                scores_batch = torch.matmul(batch_scenario_slice, active_short_pi_gpu.T)  # shape: (batch_size, num_pi)
+                scores_batch += constant_score_part_all_k  # In-place addition, shape: (batch_size, num_pi)
                 
                 # --- Step 2: Find Top Candidates ---
                 effective_k = min(self.NUM_CANDIDATES, self.num_pi)
-                top_k_scores, top_k_indices = torch.topk(scores_batch, k=effective_k, dim=1)
+                top_k_scores, top_k_indices = torch.topk(scores_batch, k=effective_k, dim=1)  # shapes: (batch_size, effective_k)
 
                 # --- Step 3 & 4: Batched Feasibility Check ---
                 # Flatten the workload: (batch_size, k) -> (batch_size * k)
-                candidate_indices_flat = top_k_indices.flatten()
+                candidate_indices_flat = top_k_indices.flatten()  # shape: (batch_size * effective_k,)
 
                 # Gather basis data from CPU cache
-                unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat.cpu(), return_inverse=True)
+                unique_candidate_indices, inverse_map = torch.unique(candidate_indices_flat.cpu(), return_inverse=True)  # shapes: (n_unique,), (batch_size * effective_k,)
                 
-                factors_batch_cpu = self.basis_factors_cpu[unique_candidate_indices]
-                pivots_batch_cpu = self.basis_pivots_cpu[unique_candidate_indices]
-                lb_batch_cpu = self.basis_lb_cpu[unique_candidate_indices]
-                ub_batch_cpu = self.basis_ub_cpu[unique_candidate_indices]
-                non_basic_contrib_cpu = self.non_basic_contribution_cpu[unique_candidate_indices]
+                factors_batch_cpu = self.basis_factors_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                pivots_batch_cpu = self.basis_pivots_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                lb_batch_cpu = self.basis_lb_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                ub_batch_cpu = self.basis_ub_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
+                non_basic_contrib_cpu = self.non_basic_contribution_cpu[unique_candidate_indices]  # shape: (n_unique, NUM_STAGE2_ROWS)
                 
                 # Move data to GPU and expand to match the flattened workload
-                factors_gpu = factors_batch_cpu.to(self.device)
-                pivots_gpu = pivots_batch_cpu.to(self.device)
-                lb_gpu = lb_batch_cpu.to(self.device)
-                ub_gpu = ub_batch_cpu.to(self.device)
-                non_basic_contrib_gpu = non_basic_contrib_cpu.to(self.device)
-                inverse_map_gpu = inverse_map.to(self.device)
+                if self.device.type == 'cuda':
+                    factors_gpu = factors_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                    pivots_gpu = pivots_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    lb_gpu = lb_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    ub_gpu = ub_batch_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    non_basic_contrib_gpu = non_basic_contrib_cpu.to(self.device)  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    inverse_map_gpu = inverse_map.to(self.device)  # shape: (batch_size * effective_k,)
+                else:
+                    # On CPU, avoid unnecessary copying
+                    factors_gpu = factors_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                    pivots_gpu = pivots_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    lb_gpu = lb_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    ub_gpu = ub_batch_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    non_basic_contrib_gpu = non_basic_contrib_cpu  # shape: (n_unique, NUM_STAGE2_ROWS)
+                    inverse_map_gpu = inverse_map  # shape: (batch_size * effective_k,)
 
-                expanded_factors = factors_gpu[inverse_map_gpu]
-                expanded_pivots = pivots_gpu[inverse_map_gpu]
-                expanded_lb = lb_gpu[inverse_map_gpu]
-                expanded_ub = ub_gpu[inverse_map_gpu]
-                expanded_non_basic_contrib = non_basic_contrib_gpu[inverse_map_gpu]
-
-                # Assemble RHS for every candidate
-                optimality_dtype = expanded_factors.dtype
-                delta_r_candidates = torch.zeros((batch_size * effective_k, self.NUM_STAGE2_ROWS), dtype=optimality_dtype, device=self.device)
+                # Use slices of pre-allocated tensors and populate with index_select (avoids allocation)
+                total_candidates = batch_size * effective_k
+                expanded_factors_slice = expanded_factors[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS)
+                expanded_pivots_slice = expanded_pivots[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                expanded_lb_slice = expanded_lb[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                expanded_ub_slice = expanded_ub[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                expanded_non_basic_contrib_slice = expanded_non_basic_contrib[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
                 
-                # Repeat each scenario's delta_r `effective_k` times
-                repeated_delta_r = batch_scenario_slice.to(optimality_dtype).repeat_interleave(effective_k, dim=0)
+                torch.index_select(factors_gpu, 0, inverse_map_gpu, out=expanded_factors_slice)
+                torch.index_select(pivots_gpu, 0, inverse_map_gpu, out=expanded_pivots_slice)
+                torch.index_select(lb_gpu, 0, inverse_map_gpu, out=expanded_lb_slice)
+                torch.index_select(ub_gpu, 0, inverse_map_gpu, out=expanded_ub_slice)
+                torch.index_select(non_basic_contrib_gpu, 0, inverse_map_gpu, out=expanded_non_basic_contrib_slice)
+
+                # Use slices of pre-allocated intermediate matrices (eliminates per-iteration allocation)
+                delta_r_candidates_slice = delta_r_candidates[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                repeated_delta_r_slice = repeated_delta_r[:total_candidates]  # shape: (total_candidates, short_delta_r_dim)
+                rhs_candidates_slice = rhs_candidates[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                solution_z_B_slice = solution_z_B[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS, 1)
+                feasible_slice = feasible[:total_candidates]  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                
+                # Clear delta_r_candidates slice (reuse zeros tensor)
+                delta_r_candidates_slice.zero_()
+                
+                # Populate repeated_delta_r slice using tensor views (zero allocation)
+                batch_scenario_optimality = batch_scenario_slice.to(optimality_dtype)  # shape: (batch_size, short_delta_r_dim)
+                # Reshape slice to (batch_size, effective_k, short_delta_r_dim) then copy batch data to each k
+                repeated_view = repeated_delta_r_slice[:total_candidates].view(batch_size, effective_k, -1)  # shape: (batch_size, effective_k, short_delta_r_dim)
+                repeated_view.copy_(batch_scenario_optimality.unsqueeze(1).expand(-1, effective_k, -1))  # broadcast across k dimension
                 
                 # Use index_add_ for sparse-to-dense conversion
-                delta_r_candidates.index_add_(1, self.r_sparse_indices_gpu, repeated_delta_r)
+                delta_r_candidates_slice.index_add_(1, self.r_sparse_indices_gpu, repeated_delta_r_slice)  # delta_r_candidates_slice shape: (total_candidates, NUM_STAGE2_ROWS)
                 
-                rhs_candidates = h_bar_gpu.to(optimality_dtype).repeat(batch_size * effective_k, 1) + delta_r_candidates - expanded_non_basic_contrib
+                # Assemble RHS (reuse pre-allocated tensor)
+                h_bar_optimality = h_bar_gpu.to(optimality_dtype)  # shape: (NUM_STAGE2_ROWS,)
+                rhs_candidates_slice.copy_(h_bar_optimality.unsqueeze(0).expand(total_candidates, -1))  # broadcast to all candidates
+                rhs_candidates_slice.add_(delta_r_candidates_slice).sub_(expanded_non_basic_contrib_slice)  # shape: (total_candidates, NUM_STAGE2_ROWS)
 
-                # Solve all systems in one go
-                solution_z_B = torch.linalg.lu_solve(expanded_factors, expanded_pivots, rhs_candidates.unsqueeze(-1)).squeeze(-1)
+                # Solve all systems in one go (device-conditional approach)
+                torch.linalg.lu_solve(expanded_factors_slice, expanded_pivots_slice, 
+                                    rhs_candidates_slice.unsqueeze(-1), out=solution_z_B_slice)
+
+                # Create 2D view for feasibility check (zero-cost view)
+                solution_z_B_2D = solution_z_B_slice.squeeze(-1)  # shape: (total_candidates, NUM_STAGE2_ROWS)
                 
-                # Check feasibility
-                feasible = (solution_z_B >= expanded_lb - primal_feas_tol) & (solution_z_B <= expanded_ub + primal_feas_tol)
-                is_feasible_flat = torch.all(feasible, dim=1)
+                # Check feasibility (reuse pre-allocated tensor)
+                feasible_slice.copy_((solution_z_B_2D >= expanded_lb_slice - primal_feas_tol) & (solution_z_B_2D <= expanded_ub_slice + primal_feas_tol))  # shape: (total_candidates, NUM_STAGE2_ROWS)
+                is_feasible_flat = torch.all(feasible_slice, dim=1)  # shape: (total_candidates,)
                 
                 # --- Step 5: Select the First Valid Winner ---
-                is_feasible_batch = is_feasible_flat.view(batch_size, effective_k)
+                is_feasible_batch = is_feasible_flat.view(batch_size, effective_k)  # shape: (batch_size, effective_k)
                 
                 # For each row, find the index of the first 'True'. If all are 'False', argmax returns 0.
-                first_feasible_idx = torch.argmax(is_feasible_batch.int(), dim=1)
+                first_feasible_idx = torch.argmax(is_feasible_batch.int(), dim=1)  # shape: (batch_size,)
 
                 # Gather the final winning indices and scores
-                best_k_index_batch = top_k_indices.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)
-                best_k_scores_batch = top_k_scores.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)
+                best_k_index_batch = top_k_indices.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)  # shape: (batch_size,)
+                best_k_scores_batch = top_k_scores.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)  # shape: (batch_size,)
 
                 # Store the boolean feasibility status of the chosen winner
                 final_optimality_status = is_feasible_batch.gather(1, first_feasible_idx.unsqueeze(1)).squeeze(1)
