@@ -68,7 +68,8 @@ class BendersSolver:
             reader=self.reader,
             MAX_PI=self.config['MAX_PI'],
             MAX_OMEGA=self.config['MAX_OMEGA'],
-            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE']
+            scenario_batch_size=self.config['SCENARIO_BATCH_SIZE'],
+            NUM_CANDIDATES=self.config.get('NUM_CANDIDATES', 8)
         )
         self.logger.info("ArgmaxOperation initialized.")
 
