@@ -3,10 +3,10 @@
     "smps_time_file": "./smps_data/cep/cep.tim",
     "smps_sto_file": "./smps_data/cep/cep.sto",
     "input_h5_basis_file": "./cep_1000scen_results.h5",
-    "MAX_PI": 10000,
-    "MAX_OMEGA": 10000,
+    "MAX_PI": 500000,
+    "MAX_OMEGA": 1000000,
     "SCENARIO_BATCH_SIZE": 1000,
-    "NUM_SAMPLES_FOR_POOL": 10000,
+    "NUM_SAMPLES_FOR_POOL": 1000000,
     "ETA_LOWER_BOUND": 0.0,
     "initial_rho": 1.0,
     "rho_increase_factor": 2.0,
@@ -20,7 +20,7 @@
     "argmax_tol_cutoff": 1e-3,
     "NUM_CANDIDATES": 8,
     "num_workers": 4,
-    "num_lp_scenarios_per_iteration": 1000,
+    "num_lp_scenarios_per_iteration": 10000,
     "lp_scenario_selection_strategy": "systematic",
     "instance_name": "benders_run_cep"
 }

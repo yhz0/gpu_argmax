@@ -455,7 +455,7 @@ class ArgmaxOperation:
         if not self.has_pending_factorizations:
             return  # Nothing to process
         
-        print(f"[{time.strftime('%H:%M:%S')}] Processing {len(self.pending_vbasis_list)} pending factorizations...")
+        # print(f"[{time.strftime('%H:%M:%S')}] Processing {len(self.pending_vbasis_list)} pending factorizations...")
         start_time = time.time()
         
         # Initialize D matrix on GPU if needed
@@ -489,7 +489,7 @@ class ArgmaxOperation:
         self.has_pending_factorizations = False
         
         end_time = time.time()
-        print(f"[{time.strftime('%H:%M:%S')}] Completed {total_processed} factorizations in {end_time - start_time:.2f}s")
+        # print(f"[{time.strftime('%H:%M:%S')}] Completed {total_processed} factorizations in {end_time - start_time:.2f}s")
 
     def _compute_scores_batch_core(self, batch_scenario_slice: torch.Tensor, 
                                    active_short_pi_gpu: torch.Tensor, 

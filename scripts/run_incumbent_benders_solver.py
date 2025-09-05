@@ -130,6 +130,9 @@ class BendersSolver:
                 else:
                     self.logger.warning(f"Initial duals/basis not fully found in {h5_path}. ArgmaxOperation may start with no preloaded duals.")
 
+            self.logger.info("Factorizing initial basis.")
+            self.argmax_op.finalize_dual_additions()
+        
         except Exception as e:
             self.logger.error(f"Error loading initial basis from {h5_path}: {e}", exc_info=True)
             raise # Ensure the error is raised to stop execution if loading fails
@@ -267,6 +270,10 @@ class BendersSolver:
             #     continue
             if self.argmax_op.add_pi(pi_all[s_idx], rc_all[s_idx], vbasis_out[s_idx], cbasis_out[s_idx]):
                 added_count += 1
+        
+        # Finalize basis addition and Factor basis
+        self.argmax_op.finalize_dual_additions()
+
         update_time = time.time() - start_time
         return coverage_fraction, added_count, update_time
 
@@ -376,8 +383,8 @@ class BendersSolver:
         log_parts.append(f"Success: {'Y' if log_metrics.get('successful_step', False) else 'N'}")
         log_parts.append(f"FCD: {log_metrics.get('fcd', float('inf')):.4f}")
         log_parts.append(f"CostMaster: {log_metrics.get('cost_from_master', float('nan')):.4e}")
-        log_parts.append(f"CostCut: {log_metrics.get('cost_from_cut', float('nan')):.4e}")
-        log_parts.append(f"Gap: {log_metrics.get('gap', float('nan')):.4e}")
+        # log_parts.append(f"CostCut: {log_metrics.get('cost_from_cut', float('nan')):.4e}")
+        # log_parts.append(f"Gap: {log_metrics.get('gap', float('nan')):.4e}")
         log_parts.append(f"CostArgmax: {log_metrics.get('cost_from_argmax', float('nan')):.4e}")
         log_parts.append(f"Rho: {log_metrics.get('rho', float('nan')):.2e}")
         log_parts.append(f"CutAdded: {'Y' if log_metrics.get('cut_added') else 'N'}")
@@ -435,13 +442,14 @@ class BendersSolver:
             
             # 2. Select scenarios for LP solving
             selected_lp_scenarios = self._select_lp_scenarios(iter_count)
-            self.logger.info(f"Iter {iter_count}: Selected {len(selected_lp_scenarios)} scenarios for LP solving "
+            self.logger.debug(f"Iter {iter_count}: Selected {len(selected_lp_scenarios)} scenarios for LP solving "
                            f"(strategy: {self.config.get('lp_scenario_selection_strategy', 'systematic')})")
             
             # 3. Warmstart preparation: Run argmax with top-k on selected scenarios only
             warmstart_start_time = time.time()
             selected_best_scores, selected_best_indices, selected_is_optimal = \
                 self.argmax_op.find_optimal_basis_with_subset(self.x_candidate, selected_lp_scenarios)
+            
             
             # Get warmstart basis for selected scenarios 
             vbasis_batch, cbasis_batch = self.argmax_op.get_basis(selected_best_indices)
@@ -523,9 +531,9 @@ class BendersSolver:
             # --- Collect Metrics for Logging ---
             c_transpose_x = self.c_vector @ self.x_candidate
             cost_from_master = master_total_obj_candidate
-            cost_from_cut = c_transpose_x + subproblem_actual_q_x if subproblem_actual_q_x > -np.inf else float('inf')
+            # cost_from_cut = c_transpose_x + subproblem_actual_q_x if subproblem_actual_q_x > -np.inf else float('inf')
             cost_from_argmax = c_transpose_x + argmax_estim_q_x
-            gap = cost_from_cut - cost_from_master
+            # gap = cost_from_cut - cost_from_master
             total_iteration_time = time.time() - iter_time_start
 
             iteration_metrics = {
@@ -541,10 +549,10 @@ class BendersSolver:
                 "cost_from_master": cost_from_master,
                 "cost_from_argmax": cost_from_argmax,
                 "subproblem_actual_q_x": subproblem_actual_q_x,
-                "cost_from_cut": cost_from_cut,
+                # "cost_from_cut": cost_from_cut,
                 "rho": self.rho,
                 "cut_added": cut_added,
-                "gap": gap,
+                # "gap": gap,
                 "x_norm": scipy.linalg.norm(self.x_candidate),
                 "argmax_num_pi": self.argmax_op.num_pi,
                 "coverage_fraction": coverage_fraction,
