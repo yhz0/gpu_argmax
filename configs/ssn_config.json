@@ -5,7 +5,7 @@
     "input_h5_basis_file": "./ssn_1000scen_results.h5",
     "MAX_PI": 400000,
     "MAX_OMEGA": 1000000,
-    "NUM_CANDIDATES": 250,
+    "NUM_CANDIDATES": 32,
     "SCENARIO_BATCH_SIZE": 1000,
     "NUM_SAMPLES_FOR_POOL": 1000000,
     "ETA_LOWER_BOUND": 0.0,
@@ -21,6 +21,6 @@
     "primal_feas_tol": 1e-2,
     "num_lp_scenarios_per_iteration": 10000,
     "lp_scenario_selection_strategy": "systematic",
-    "num_workers": null,
+    "num_workers": 192,
     "instance_name": "benders_run_ssn"
 }

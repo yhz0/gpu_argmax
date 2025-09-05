@@ -193,15 +193,15 @@ class BendersSolver:
         solve_time = time.time() - start_time
         return argmax_estim_q_x, best_k_scores, best_k_index, is_optimal, solve_time
 
-    def _solve_subproblems(self, current_x: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray], subset_indices: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    def _solve_subproblems(self, current_x: np.ndarray, short_delta_r_batch: np.ndarray, vbasis_batch: Optional[np.ndarray], cbasis_batch: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """
-        Solves a batch of subproblems in parallel, optionally for a subset of scenarios.
+        Solves a batch of subproblems in parallel.
 
         Args:
             current_x (np.ndarray): The current solution vector for the master problem.
+            short_delta_r_batch (np.ndarray): Batch of scenario-specific RHS modifications to solve.
             vbasis_batch (Optional[np.ndarray]): Optional batch of variable basis statuses for warm-starting.
             cbasis_batch (Optional[np.ndarray]): Optional batch of constraint basis statuses for warm-starting.
-            subset_indices (Optional[np.ndarray]): If provided, only solves subproblems for these indices.
 
         Returns:
             A tuple containing results for the solved scenarios.
@@ -209,8 +209,7 @@ class BendersSolver:
         start_time = time.time()
         obj_all, _, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all = \
             self.parallel_worker.solve_batch(
-                current_x, self.short_delta_r, vbasis_batch, cbasis_batch,
-                subset_indices=subset_indices
+                current_x, short_delta_r_batch, vbasis_batch, cbasis_batch
             )
         solve_time = time.time() - start_time
         return obj_all, pi_all, rc_all, vbasis_out, cbasis_out, simplex_iter_count_all, solve_time
@@ -326,6 +325,7 @@ class BendersSolver:
     def _systematic_scenario_selection(self, iteration: int, num_to_select: int) -> np.ndarray:
         """
         Rotate through scenarios systematically to ensure all scenarios are eventually processed.
+        Assumes total_scenarios is divisible by num_to_select for simplicity.
         
         Args:
             iteration: Current iteration number (1-based)
@@ -339,14 +339,8 @@ class BendersSolver:
         # Calculate starting index with systematic rotation
         start_idx = ((iteration - 1) * num_to_select) % total_scenarios
         
-        if start_idx + num_to_select <= total_scenarios:
-            # Simple case: no wraparound needed
-            return np.arange(start_idx, start_idx + num_to_select)
-        else:
-            # Wraparound case: split selection
-            part1 = np.arange(start_idx, total_scenarios)
-            part2 = np.arange(0, num_to_select - len(part1))
-            return np.concatenate([part1, part2])
+        # Simple case assuming divisibility
+        return np.arange(start_idx, start_idx + num_to_select)
 
     def _random_scenario_selection(self, num_to_select: int) -> np.ndarray:
         """
@@ -456,15 +450,41 @@ class BendersSolver:
             optimal_fraction = np.mean(selected_is_optimal) if len(selected_is_optimal) > 0 else 1.0
             self.logger.debug(f"Iter {iter_count}: Warmstart found {optimal_fraction*100:.2f}% feasible among selected scenarios.")
 
-            # 4. LP Solving: Solve only the selected scenarios
-            obj_selected, pi_selected, rc_selected, vbasis_out_selected, cbasis_out_selected, _, subproblem_time = \
-                self._solve_subproblems(self.x_candidate, vbasis_batch, cbasis_batch, subset_indices=selected_lp_scenarios)
+            # 4. LP Solving: Filter out already optimal scenarios and solve only those needing LP
+            scenarios_needing_lp_mask = ~selected_is_optimal
+            scenarios_needing_lp_indices = np.where(scenarios_needing_lp_mask)[0]  # Positions in selected arrays
+            
+            if len(scenarios_needing_lp_indices) > 0:
+                # Get absolute scenario indices for scenarios needing LP solving
+                scenarios_needing_lp = selected_lp_scenarios[scenarios_needing_lp_mask]
+                
+                # Create filtered input arrays for the parallel worker
+                short_delta_r_filtered = self.short_delta_r[scenarios_needing_lp]
+                vbasis_filtered = vbasis_batch[scenarios_needing_lp_indices] if vbasis_batch is not None else None
+                cbasis_filtered = cbasis_batch[scenarios_needing_lp_indices] if cbasis_batch is not None else None
+                
+                # Solve only the scenarios needing LP
+                obj_lp, pi_lp, rc_lp, vbasis_out_lp, cbasis_out_lp, _, subproblem_time = \
+                    self._solve_subproblems(self.x_candidate, short_delta_r_filtered, vbasis_filtered, cbasis_filtered)
+                
+                self.logger.debug(f"Iter {iter_count}: Solved {len(scenarios_needing_lp)} scenarios with LP "
+                                f"({len(selected_lp_scenarios) - len(scenarios_needing_lp)} already optimal)")
+            else:
+                # All scenarios are already optimal, no LP solving needed
+                obj_lp = np.array([])
+                pi_lp = np.empty((0, 0))
+                rc_lp = np.empty((0, 0))
+                vbasis_out_lp = np.empty((0, 0), dtype=np.int8)
+                cbasis_out_lp = np.empty((0, 0), dtype=np.int8)
+                subproblem_time = 0.0
+                self.logger.debug(f"Iter {iter_count}: All {len(selected_lp_scenarios)} scenarios already optimal, skipping LP")
 
             # 5. Add all new duals from LP solving to ArgmaxOperation
-            if len(selected_lp_scenarios) > 0:
-                score_differences = obj_selected - selected_best_scores
+            if len(scenarios_needing_lp_indices) > 0:
+                # Score differences only for scenarios that needed LP solving  
+                lp_score_differences = obj_lp - selected_best_scores[scenarios_needing_lp_mask]
                 coverage_fraction, duals_added_count, duals_update_time = self._update_argmax_duals(
-                    pi_selected, rc_selected, vbasis_out_selected, cbasis_out_selected, score_differences
+                    pi_lp, rc_lp, vbasis_out_lp, cbasis_out_lp, lp_score_differences
                 )
                 self.logger.debug(f"Iter {iter_count}: Added {duals_added_count} new duals to ArgmaxOp. Total duals: {self.argmax_op.num_pi}.")
             else:
@@ -495,7 +515,8 @@ class BendersSolver:
                 self.rho = max(min_rho, self.rho * rho_decrease_factor)
             else:
                 self.logger.debug(f"Iter {iter_count}: Unsuccessful step. Increasing rho.")
-                self.rho = self.rho * rho_increase_factor
+                max_rho = self.config.get('max_rho', 1e5)
+                self.rho = min(max_rho, self.rho * rho_increase_factor)
             
             fcd = actual_decrease / perceived_decrease if perceived_decrease != 0 else float('inf')
 

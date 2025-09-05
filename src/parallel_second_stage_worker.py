@@ -258,8 +258,7 @@ class ParallelSecondStageWorker:
     def solve_batch(self, x: np.ndarray, short_delta_r_batch: np.ndarray,
                     vbasis_batch: Optional[np.ndarray] = None,
                     cbasis_batch: Optional[np.ndarray] = None,
-                    nontrivial_rc_only: bool = True,
-                    subset_indices: Optional[np.ndarray] = None) \
+                    nontrivial_rc_only: bool = True) \
                     -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Solves a batch of second-stage scenarios in parallel using a worker pool.
@@ -274,11 +273,6 @@ class ParallelSecondStageWorker:
             vbasis_batch: Optional batch of variable basis statuses.
             cbasis_batch: Optional batch of constraint basis statuses.
             nontrivial_rc_only: If True, returns only non-trivial reduced costs.
-            subset_indices: An optional array of indices. If provided, only scenarios
-                            corresponding to these indices are solved. This is useful
-                            in procedures like argmax where only a subset of scenarios
-                            needs re-evaluation. The results will have a length equal
-                            to `len(subset_indices)`.
 
         Returns:
             A tuple containing arrays for the solved scenarios:
@@ -292,53 +286,32 @@ class ParallelSecondStageWorker:
 
         Raises:
             RuntimeError: If the worker has been closed or the pool is not initialized.
-            ValueError: If `subset_indices` contains out-of-bounds indices.
         """
         if self._closed:
             raise RuntimeError("ParallelSecondStageWorker has been closed.")
 
         rc_length = len(self._rc_mask[0]) if nontrivial_rc_only else self._num_y_vars
         
-        # Determine which scenario indices to process
-        if subset_indices is not None:
-            if len(subset_indices) == 0:
-                return (np.array([]), np.empty((0, self._num_y_vars)), np.empty((0, self._num_stage2_constrs)),
-                        np.empty((0, rc_length)), np.empty((0, self._num_y_vars), dtype=np.int8),
-                        np.empty((0, self._num_stage2_constrs), dtype=np.int8), np.array([]))
-            
-            # Validate indices
-            max_index = np.max(subset_indices)
-            if max_index >= len(short_delta_r_batch):
-                raise ValueError(f"Index {max_index} in subset_indices is out of bounds for "
-                                 f"short_delta_r_batch with size {len(short_delta_r_batch)}.")
-            
-            indices_to_process = subset_indices
-            num_scenarios_to_solve = len(indices_to_process)
-        else:
-            num_scenarios_to_solve = short_delta_r_batch.shape[0]
-            if num_scenarios_to_solve == 0:
-                return (np.array([]), np.empty((0, self._num_y_vars)), np.empty((0, self._num_stage2_constrs)),
-                        np.empty((0, rc_length)), np.empty((0, self._num_y_vars), dtype=np.int8),
-                        np.empty((0, self._num_stage2_constrs), dtype=np.int8), np.array([]))
-            indices_to_process = np.arange(num_scenarios_to_solve)
+        # Process all scenarios in the batch
+        num_scenarios_to_solve = short_delta_r_batch.shape[0]
+        if num_scenarios_to_solve == 0:
+            return (np.array([]), np.empty((0, self._num_y_vars)), np.empty((0, self._num_stage2_constrs)),
+                    np.empty((0, rc_length)), np.empty((0, self._num_y_vars), dtype=np.int8),
+                    np.empty((0, self._num_stage2_constrs), dtype=np.int8), np.array([]))
+        
+        indices_to_process = np.arange(num_scenarios_to_solve)
 
         self._synchronize_x_with_workers(x)
         if self._pool is None:
             raise RuntimeError("Worker pool not initialized after synchronization.")
 
         tasks = []
-        for original_idx in indices_to_process:
-            vb_i = vbasis_batch[original_idx] if vbasis_batch is not None else None
-            cb_i = cbasis_batch[original_idx] if cbasis_batch is not None else None
-            tasks.append((original_idx, short_delta_r_batch[original_idx], vb_i, cb_i, x.copy(), nontrivial_rc_only))
+        for idx in indices_to_process:
+            vb_i = vbasis_batch[idx] if vbasis_batch is not None else None
+            cb_i = cbasis_batch[idx] if cbasis_batch is not None else None
+            tasks.append((idx, short_delta_r_batch[idx], vb_i, cb_i, x.copy(), nontrivial_rc_only))
 
         results_from_pool = self._pool.map(solve_scenario_task_glob_worker, tasks)
-
-        # Create a mapping from original scenario index to the position in the output arrays
-        if subset_indices is not None:
-            result_pos_map = {original_idx: i for i, original_idx in enumerate(subset_indices)}
-        else:
-            result_pos_map = {i: i for i in range(num_scenarios_to_solve)}
 
         # Initialize arrays to store results, sized for the number of scenarios solved
         obj_values = np.empty(num_scenarios_to_solve, dtype=float)
@@ -350,21 +323,18 @@ class ParallelSecondStageWorker:
         cbasis_out = np.full((num_scenarios_to_solve, self._num_stage2_constrs), self.BASIS_NOT_AVAILABLE_PLACEHOLDER, dtype=np.int8)
 
         for result_tuple in results_from_pool:
-            original_idx, obj_val, y_sol, pi_sol, rc_sol, vb_out, cb_out, simplex_iter = result_tuple
-            
-            # Use the map to find the correct position in the output arrays
-            pos = result_pos_map[original_idx]
+            idx, obj_val, y_sol, pi_sol, rc_sol, vb_out, cb_out, simplex_iter = result_tuple
 
-            obj_values[pos] = obj_val
-            y_solutions[pos, :] = y_sol
-            pi_solutions[pos, :] = pi_sol
-            rc_solutions[pos, :] = rc_sol
-            iter_counts[pos] = simplex_iter
+            obj_values[idx] = obj_val
+            y_solutions[idx, :] = y_sol
+            pi_solutions[idx, :] = pi_sol
+            rc_solutions[idx, :] = rc_sol
+            iter_counts[idx] = simplex_iter
 
             if vb_out is not None:
-                vbasis_out[pos, :] = vb_out
+                vbasis_out[idx, :] = vb_out
             if cb_out is not None:
-                cbasis_out[pos, :] = cb_out
+                cbasis_out[idx, :] = cb_out
 
         return obj_values, y_solutions, pi_solutions, rc_solutions, vbasis_out, cbasis_out, iter_counts
 
