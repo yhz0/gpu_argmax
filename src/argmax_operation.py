@@ -474,6 +474,20 @@ class ArgmaxOperation:
         self.num_scenarios += num_to_add
         return True
 
+    def clear_scenarios(self) -> None:
+        """
+        Clears all stored scenario data to allow fresh scenario loading.
+        
+        This method resets the scenario counter and zeros out the scenario tensor,
+        effectively removing all previously stored scenarios. Useful for validation
+        procedures that need to work with different scenario sets.
+        
+        Note: This does not affect the stored dual solutions (pi, rc, basis data).
+        """
+        self.num_scenarios = 0
+        if hasattr(self, 'short_delta_r_gpu'):
+            self.short_delta_r_gpu.zero_()
+
     def finalize_dual_additions(self):
         """
         Process all pending basis factorizations in GPU batches.
@@ -542,7 +556,7 @@ class ArgmaxOperation:
         scores_batch += constant_score_part_all_k  # In-place addition, shape: (batch_size, num_pi)
         return scores_batch
 
-    def find_optimal_basis_fast(self, x: np.ndarray, touch_lru: bool = True) -> np.ndarray:
+    def find_optimal_basis_fast(self, x: np.ndarray, touch_lru: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """
         Fast argmax operation without top-k candidates or feasibility checking.
         Computes only the best-scoring dual solution for each scenario.
@@ -555,8 +569,11 @@ class ArgmaxOperation:
             touch_lru: Whether to update the LRU cache for the winning solutions.
             
         Returns:
-            pi_indices: Array of shape (num_scenarios,) containing the index of the 
-                       best dual solution for each scenario.
+            A tuple containing:
+            - pi_indices: Array of shape (num_scenarios,) containing the index of the 
+                         best dual solution for each scenario.
+            - best_scores: Array of shape (num_scenarios,) containing the scores of the
+                          best dual solution for each scenario.
         """
         if self.num_pi == 0:
             raise RuntimeError("No pi vectors stored. Cannot find optimal basis.")
@@ -566,6 +583,7 @@ class ArgmaxOperation:
             raise ValueError("Input x has incorrect shape.")
 
         pi_indices = np.zeros(self.num_scenarios, dtype=np.int64)
+        best_scores = np.zeros(self.num_scenarios, dtype=np.float32)
 
         with torch.no_grad():
             # --- Prepare device data views ---
@@ -604,11 +622,12 @@ class ArgmaxOperation:
                 
                 # --- Store Results ---
                 pi_indices[start_idx:end_idx] = best_indices_batch.cpu().numpy()
+                best_scores[start_idx:end_idx] = best_scores_batch.cpu().numpy()
 
         if touch_lru:
             self.update_lru_on_access(pi_indices)
 
-        return pi_indices
+        return pi_indices, best_scores
 
     def find_optimal_basis_with_subset(self, x: np.ndarray, scenario_indices: np.ndarray, 
                                        touch_lru: bool = True, primal_feas_tol: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

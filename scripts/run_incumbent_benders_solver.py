@@ -182,7 +182,7 @@ class BendersSolver:
         start_time = time.time()
         
         # Use fast argmax to get pi indices for all scenarios
-        pi_indices = self.argmax_op.find_optimal_basis_fast(current_x)
+        pi_indices, _ = self.argmax_op.find_optimal_basis_fast(current_x)
         
         # Calculate cut coefficients using the pi indices
         alpha_pre, beta_pre = self.argmax_op.calculate_cut_coefficients(pi_indices)
@@ -505,7 +505,7 @@ class BendersSolver:
 
             # 6. Fast cut generation: Run argmax (fast mode) on ALL scenarios
             argmax_start_time = time.time()
-            pi_indices_all_scenarios = self.argmax_op.find_optimal_basis_fast(self.x_candidate)
+            pi_indices_all_scenarios, _ = self.argmax_op.find_optimal_basis_fast(self.x_candidate)
             argmax_time = time.time() - argmax_start_time
 
             # 7. Calculate cut using pure argmax (no overrides needed)

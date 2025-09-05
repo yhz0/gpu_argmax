@@ -122,7 +122,7 @@ def run_benchmark(N: int, M: int, DEVICE: str):
             torch.cuda.synchronize()
         start_time = time.perf_counter()
         
-        pi_indices = argmax_op.find_optimal_basis_fast(x_vector, touch_lru=False)
+        pi_indices, _ = argmax_op.find_optimal_basis_fast(x_vector, touch_lru=False)
         
         if DEVICE == 'cuda':
             torch.cuda.synchronize()
