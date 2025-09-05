@@ -41,7 +41,8 @@ class ArgmaxOperation:
                  scenario_batch_size: int = 10000,
                  device: Optional[Union[str, torch.device]] = None,
                  NUM_CANDIDATES: int = 8,
-                 optimality_dtype: torch.dtype = torch.float32
+                 optimality_dtype: torch.dtype = torch.float32,
+                 factorization_batch_size: int = 1000
                  ):
         """
         Initializes the ArgmaxOperation class.
@@ -64,6 +65,8 @@ class ArgmaxOperation:
             optimality_dtype: The torch.dtype for storing basis factors and related data
                               for optimality checks. Defaults to torch.float32. Use
                               torch.float64 for higher precision if needed.
+            factorization_batch_size: Number of basis matrices to process in each GPU batch
+                                    for LU factorization. Defaults to 1000.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
         start_time = time.time()
@@ -110,6 +113,7 @@ class ArgmaxOperation:
         self.MAX_PI = MAX_PI
         self.MAX_OMEGA = MAX_OMEGA
         self.scenario_batch_size = scenario_batch_size
+        self.factorization_batch_size = factorization_batch_size
         self.NUM_CANDIDATES = NUM_CANDIDATES
         self.r_sparse_indices_cpu = np.sort(np.array(r_sparse_indices, dtype=np.int32))
         self.R_SPARSE_LEN = len(self.r_sparse_indices_cpu)
@@ -190,6 +194,13 @@ class ArgmaxOperation:
         # Current candidate solution
         self.current_x_gpu = torch.zeros(X_DIM, dtype=torch.float32, device=self.device)
 
+        # --- Pending Factorizations for Batch Processing ---
+        self.pending_vbasis_list = []
+        self.pending_cbasis_list = []
+        self.pending_cpu_indices = []
+        self.has_pending_factorizations = False
+        self.D_gpu = None  # Will be initialized when first needed
+
         end_time = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] Initialization complete ({end_time - start_time:.2f}s).")
 
@@ -199,7 +210,8 @@ class ArgmaxOperation:
                          scenario_batch_size: int = 10000,
                          device: Optional[Union[str, torch.device]] = None,
                          NUM_CANDIDATES: int = 8,
-                         optimality_dtype: torch.dtype = torch.float32) -> 'ArgmaxOperation':
+                         optimality_dtype: torch.dtype = torch.float32,
+                         factorization_batch_size: int = 1000) -> 'ArgmaxOperation':
         """
         Factory method to create an ArgmaxOperation instance from an SMPSReader.
 
@@ -211,6 +223,7 @@ class ArgmaxOperation:
             device: PyTorch device ('cuda', 'cpu', etc.). Auto-detects if None.
             NUM_CANDIDATES: The number of top candidates to check for feasibility.
             optimality_dtype: The torch.dtype for storing basis factors. Defaults to torch.float32.
+            factorization_batch_size: Number of basis matrices to process in each GPU batch. Defaults to 1000.
 
         Returns:
             An initialized ArgmaxOperation instance.
@@ -254,7 +267,8 @@ class ArgmaxOperation:
             scenario_batch_size=scenario_batch_size,
             device=device,
             NUM_CANDIDATES=NUM_CANDIDATES,
-            optimality_dtype=optimality_dtype
+            optimality_dtype=optimality_dtype,
+            factorization_batch_size=factorization_batch_size
         )
 
     def _hash_basis_pair(self, vbasis: np.ndarray, cbasis: np.ndarray) -> str:
@@ -326,28 +340,12 @@ class ArgmaxOperation:
         self.rc_gpu[idx].copy_(torch.from_numpy(new_rc), non_blocking=is_cuda)
         self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
 
-        # --- Offline Factorization for Optimality Checking  ---
-        # 1. Construct the sparse basis matrix B
-        B = self._get_basis_matrix(new_vbasis, new_cbasis)
-
-        try:
-            # 2. Factorize B and cache the LU factors and pivots using PyTorch
-            B_dense_tensor = torch.from_numpy(B.toarray()).to(
-                dtype=self.basis_factors_cpu.dtype,
-                device=self.basis_factors_cpu.device
-            )
-            torch.linalg.lu_factor(
-                B_dense_tensor,
-                pivot=True,
-                out=(self.basis_factors_cpu[idx], self.basis_pivots_cpu[idx])
-            )
-        except torch.linalg.LinAlgError:
-            print(f"Warning: Singular basis matrix encountered for new solution {self.num_pi}. "
-                  "Marking factors with NaN to fail optimality checks.")
-            # Mark with NaN so it never passes the optimality check
-            self.basis_factors_cpu[idx].fill_(float('nan'))
-            # Pivots can be zero, doesn't matter as NaN factors will propagate
-            self.basis_pivots_cpu[idx].zero_()
+        # --- Queue for Batch Factorization ---
+        # Instead of immediate factorization, add to pending arrays for batch processing
+        self.pending_vbasis_list.append(new_vbasis.copy())
+        self.pending_cbasis_list.append(new_cbasis.copy())
+        self.pending_cpu_indices.append(idx)
+        self.has_pending_factorizations = True
 
         # 3. Cache the bounds for the basic variables
         lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
@@ -447,6 +445,51 @@ class ArgmaxOperation:
         self.num_scenarios += num_to_add
         return True
 
+    def finalize_dual_additions(self):
+        """
+        Process all pending basis factorizations in GPU batches.
+        
+        This method must be called after adding dual solutions and before calling
+        find_optimal_basis_with_subset() to ensure all basis matrices are factorized.
+        """
+        if not self.has_pending_factorizations:
+            return  # Nothing to process
+        
+        print(f"[{time.strftime('%H:%M:%S')}] Processing {len(self.pending_vbasis_list)} pending factorizations...")
+        start_time = time.time()
+        
+        # Initialize D matrix on GPU if needed
+        if self.D_gpu is None:
+            self._initialize_D_gpu()
+        
+        # Process in batches
+        total_processed = 0
+        batch_size = self.factorization_batch_size
+        
+        for batch_start in range(0, len(self.pending_vbasis_list), batch_size):
+            batch_end = min(batch_start + batch_size, len(self.pending_vbasis_list))
+            
+            # Extract batch data
+            batch_vbasis = self.pending_vbasis_list[batch_start:batch_end]
+            batch_cbasis = self.pending_cbasis_list[batch_start:batch_end]
+            batch_cpu_indices = self.pending_cpu_indices[batch_start:batch_end]
+            
+            # Process batch on GPU
+            self._process_factorization_batch(batch_vbasis, batch_cbasis, batch_cpu_indices)
+            
+            total_processed += len(batch_vbasis)
+            
+            # Free GPU memory between batches
+            torch.cuda.empty_cache()
+        
+        # Clear pending arrays
+        self.pending_vbasis_list.clear()
+        self.pending_cbasis_list.clear()
+        self.pending_cpu_indices.clear()
+        self.has_pending_factorizations = False
+        
+        end_time = time.time()
+        print(f"[{time.strftime('%H:%M:%S')}] Completed {total_processed} factorizations in {end_time - start_time:.2f}s")
 
     def _compute_scores_batch_core(self, batch_scenario_slice: torch.Tensor, 
                                    active_short_pi_gpu: torch.Tensor, 
@@ -552,6 +595,12 @@ class ArgmaxOperation:
             - best_k_indices: The indices of the best dual for each processed scenario  
             - is_optimal: Boolean array indicating feasibility for each processed scenario
         """
+        if self.has_pending_factorizations:
+            raise RuntimeError(
+                "Cannot perform optimal basis finding with pending factorizations. "
+                "Please call finalize_dual_additions() first to process all pending basis factorizations."
+            )
+        
         if self.num_pi == 0:
             print("Warning: No pi vectors stored. Cannot find optimal basis.")
             return np.array([]), np.array([]), np.array([])
@@ -970,3 +1019,66 @@ class ArgmaxOperation:
         cbasis_batch = self.cbasis_cpu[indices]
         
         return vbasis_batch, cbasis_batch
+
+    def _initialize_D_gpu(self):
+        """Initialize D matrix on GPU for efficient column slicing."""
+        print(f"[{time.strftime('%H:%M:%S')}] Initializing D matrix on GPU...")
+        # Convert D to dense tensor on GPU for efficient column indexing
+        D_dense = torch.from_numpy(self.D.toarray()).to(
+            dtype=self.basis_factors_cpu.dtype,
+            device=self.device
+        )
+        self.D_gpu = D_dense
+        print(f"[{time.strftime('%H:%M:%S')}] D matrix cached on GPU: shape {self.D_gpu.shape}")
+
+    def _process_factorization_batch(self, batch_vbasis, batch_cbasis, batch_cpu_indices):
+        """Process a batch of basis matrices for LU factorization on GPU."""
+        batch_size = len(batch_vbasis)
+        gpu_matrices = []
+        
+        # Construct basis matrices on GPU
+        for i in range(batch_size):
+            B_gpu = self._get_basis_matrix_gpu(batch_vbasis[i], batch_cbasis[i])
+            gpu_matrices.append(B_gpu)
+        
+        # Stack matrices for batch processing
+        if batch_size == 1:
+            batch_tensor = gpu_matrices[0].unsqueeze(0)
+        else:
+            batch_tensor = torch.stack(gpu_matrices)
+        
+        # Batch LU factorization
+        factors, pivots = torch.linalg.lu_factor(batch_tensor)
+        
+        # Write back to CPU storage using vectorized indexing
+        cpu_indices_tensor = torch.tensor(batch_cpu_indices)
+        self.basis_factors_cpu[cpu_indices_tensor] = factors.cpu()
+        self.basis_pivots_cpu[cpu_indices_tensor] = pivots.cpu()
+    
+    def _get_basis_matrix_gpu(self, vbasis: np.ndarray, cbasis: np.ndarray) -> torch.Tensor:
+        """Construct basis matrix directly on GPU."""
+        basic_var_indices = np.where(vbasis == 0)[0]
+        basic_slack_indices = np.where(cbasis == 0)[0]
+        
+        # Select columns from D matrix on GPU
+        basic_var_indices_gpu = torch.tensor(basic_var_indices, device=self.device, dtype=torch.long)
+        d_cols_gpu = self.D_gpu[:, basic_var_indices_gpu]
+        
+        if len(basic_slack_indices) > 0:
+            # Create slack columns on GPU
+            sense_values = torch.tensor([
+                -1.0 if self.sense[j] == '>' else 1.0 
+                for j in basic_slack_indices
+            ], device=self.device, dtype=self.D_gpu.dtype)
+            
+            slack_cols = torch.zeros((self.NUM_STAGE2_ROWS, len(basic_slack_indices)), 
+                                   device=self.device, dtype=self.D_gpu.dtype)
+            slack_cols[basic_slack_indices, torch.arange(len(basic_slack_indices))] = sense_values
+            
+            # Concatenate D columns with slack columns
+            B_gpu = torch.cat([d_cols_gpu, slack_cols], dim=1)
+        else:
+            B_gpu = d_cols_gpu
+        
+        return B_gpu
+    

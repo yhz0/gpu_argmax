@@ -106,6 +106,9 @@ class TestOptimalityCheck(unittest.TestCase):
         for s in range(num_duals_to_add):
             argmax_op.add_pi(self.pi_s[s, :], np.array([]), self.vbasis_y_all[s, :], self.cbasis_y_all[s, :])
 
+        # Step 4.5: Finalize dual additions to process pending factorizations
+        argmax_op.finalize_dual_additions()
+
         # Step 5: Run argmax procedure with optimality checking
         all_scenario_indices = np.arange(self.num_scenarios)
         scores, indices, is_optimal = argmax_op.find_optimal_basis_with_subset(

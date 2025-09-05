@@ -50,7 +50,7 @@ def run_benchmark(N: int, M: int, DEVICE: str):
         reader=reader,
         MAX_PI=M,
         MAX_OMEGA=N,
-        scenario_batch_size=1000, 
+        scenario_batch_size=10000, 
         device=DEVICE
     )
 
@@ -75,65 +75,71 @@ def run_benchmark(N: int, M: int, DEVICE: str):
     num_bounded_vars = argmax_op.NUM_BOUNDED_VARS # Should be 0
     
     # Loop until we have successfully added M unique solutions
-    while argmax_op.num_pi < M:
-        # Generate random basis vectors. Basis statuses are small integers.
-        # Gurobi: vbasis (-1, 0, 1, 2), cbasis (-1, 0, 1)
-        new_vbasis = np.random.randint(-1, 3, size=num_stage2_vars, dtype=np.int8)
-        new_cbasis = np.random.randint(-1, 2, size=num_stage2_rows, dtype=np.int8)
+    # Generate fake but dimensionally-valid bases (won't be factorized)
+    added_count = 0
+    while argmax_op.num_pi < M and added_count < M * 20:  # Prevent infinite loop
+        # Create dimensionally-correct fake basis:
+        # - Exactly 175 basic variables (to match NUM_STAGE2_ROWS)
+        # - All constraints non-basic (no slack variables basic)
+        new_vbasis = np.full(num_stage2_vars, -1, dtype=np.int8)  # All non-basic initially
+        new_cbasis = np.full(num_stage2_rows, -1, dtype=np.int8)   # All non-basic
+        
+        # Randomly select exactly 175 variables to be basic
+        basic_var_indices = np.random.choice(num_stage2_vars, size=num_stage2_rows, replace=False)
+        new_vbasis[basic_var_indices] = 0  # Set selected variables as basic
         
         # Generate random pi and rc vectors
         new_pi = np.random.rand(num_stage2_rows).astype(np.float32)
-        new_rc = np.array([], dtype=np.float32) # Empty for ssn
+        new_rc = np.array([], dtype=np.float32) # Empty for ssn (no bounded variables)
 
-        # The add_pi method handles deduplication based on the basis hash
-        argmax_op.add_pi(new_pi, new_rc, new_vbasis, new_cbasis)
+        # Add the dual solution (basis validity doesn't matter since we won't factorize)
+        success = argmax_op.add_pi(new_pi, new_rc, new_vbasis, new_cbasis)
+        if not success:
+            added_count += 1  # Count failed attempts (duplicates)
 
     print(f"[{time.strftime('%H:%M:%S')}] {argmax_op.num_pi} dual solutions added.")
 
-    # 5. Run and time the new methods
+    # 5. Skip finalization since we're using fake bases and only testing fast argmax
+    # ============================================
+    print(f"[{time.strftime('%H:%M:%S')}] Skipping finalization (using fake bases for fast argmax only)...")
+
+    # 6. Run and time the methods
     # ============================================
     # Generate a random first-stage decision vector 'x'
     x_dim = len(reader.x_indices) # 89 for ssn
     x_vector = np.random.rand(x_dim).astype(np.float32)
-
-    # --- Benchmark find_optimal_basis ---
-    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of find_optimal_basis...")
-    if DEVICE == 'cuda':
-        torch.cuda.synchronize()
-    start_time_find = time.perf_counter()
     
-    argmax_op.find_optimal_basis(x_vector)
+    # Number of benchmark runs for statistical reliability
+    NUM_RUNS = 10
+    print(f"\n[{time.strftime('%H:%M:%S')}] Running {NUM_RUNS} benchmark iterations...")
+
+    # --- Benchmark find_optimal_basis_fast (Full Method) ---
+    print(f"\n[{time.strftime('%H:%M:%S')}] Benchmarking find_optimal_basis_fast (full method)...")
+    times_full = []
     
-    if DEVICE == 'cuda':
-        torch.cuda.synchronize()
-    end_time_find = time.perf_counter()
-    elapsed_time_find_ms = (end_time_find - start_time_find) * 1000.0
-    print(f"[{time.strftime('%H:%M:%S')}] find_optimal_basis benchmark finished.")
-
-    # --- Benchmark calculate_cut_coefficients ---
-    print(f"\n[{time.strftime('%H:%M:%S')}] Starting benchmark of calculate_cut_coefficients...")
-    if DEVICE == 'cuda':
-        torch.cuda.synchronize()
-    start_time_calc = time.perf_counter()
-
-    result = argmax_op.calculate_cut_coefficients()
-
-    if DEVICE == 'cuda':
-        torch.cuda.synchronize()
-    end_time_calc = time.perf_counter()
-    elapsed_time_calc_ms = (end_time_calc - start_time_calc) * 1000.0
-    print(f"[{time.strftime('%H:%M:%S')}] calculate_cut_coefficients benchmark finished.")
-
-    # --- Final Result ---
-    print("\n------------------------------------------")
-    if result:
-        alpha, beta = result
-        print("Cut calculation successful.")
-        print(f"  alpha: {alpha:.6f}")
-        print(f"  beta[0:5]: {beta[:5]}")
-    else:
-        print("Cut calculation failed.")
+    for run in range(NUM_RUNS):
+        if DEVICE == 'cuda':
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        
+        pi_indices = argmax_op.find_optimal_basis_fast(x_vector, touch_lru=False)
+        
+        if DEVICE == 'cuda':
+            torch.cuda.synchronize()
+        end_time = time.perf_counter()
+        
+        elapsed_ms = (end_time - start_time) * 1000.0
+        times_full.append(elapsed_ms)
     
-    print(f"\nExecution time for find_optimal_basis: {elapsed_time_find_ms:.2f} ms")
-    print(f"Execution time for calculate_cut_coefficients: {elapsed_time_calc_ms:.2f} ms")
-    print("------------------------------------------")
+    avg_time_full = np.mean(times_full)
+    std_time_full = np.std(times_full)
+    print(f"[{time.strftime('%H:%M:%S')}] Full method: {avg_time_full:.2f} ± {std_time_full:.2f} ms")
+
+    # Return structured results for external processing
+    return {
+        'device': DEVICE,
+        'N': N,
+        'M': M,
+        'full_method_avg_ms': avg_time_full,
+        'full_method_std_ms': std_time_full,
+    }
