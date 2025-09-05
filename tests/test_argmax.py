@@ -107,7 +107,8 @@ class TestArgmaxCalculationCEP(unittest.TestCase):
         max_scenario_capacity = 10000
 
         cls.argmax_op = ArgmaxOperation.from_smps_reader(
-            cls.reader, max_pi_capacity, max_scenario_capacity, device='cpu'
+            cls.reader, max_pi_capacity, max_scenario_capacity, 
+            device='cpu', enable_optimality_check=False
         )
 
         # Get the variations delta_r from the stochastic parts

@@ -27,6 +27,8 @@ class ArgmaxOperation:
     - Uses double precision (float64) for key reduction steps for accuracy.
     - Handles sparse transfer matrix C (torch.sparse_csr_tensor).
     - Configurable precision for optimality checking (`torch.float32` or `torch.float64`).
+    - Optional optimality checking: when disabled, skips basis factorization and
+      feasibility verification for improved performance and reduced memory usage.
     """
 
     def __init__(self, NUM_STAGE2_ROWS: int, NUM_STAGE2_VARS: int,
@@ -42,7 +44,8 @@ class ArgmaxOperation:
                  device: Optional[Union[str, torch.device]] = None,
                  NUM_CANDIDATES: int = 8,
                  optimality_dtype: torch.dtype = torch.float32,
-                 factorization_batch_size: int = 1000
+                 factorization_batch_size: int = 1000,
+                 enable_optimality_check: bool = True
                  ):
         """
         Initializes the ArgmaxOperation class.
@@ -67,6 +70,9 @@ class ArgmaxOperation:
                               torch.float64 for higher precision if needed.
             factorization_batch_size: Number of basis matrices to process in each GPU batch
                                     for LU factorization. Defaults to 1000.
+            enable_optimality_check: Whether to enable optimality checking and feasibility 
+                                   verification. When False, skips basis factorization and
+                                   related memory allocations. Defaults to True.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
         start_time = time.time()
@@ -115,6 +121,7 @@ class ArgmaxOperation:
         self.scenario_batch_size = scenario_batch_size
         self.factorization_batch_size = factorization_batch_size
         self.NUM_CANDIDATES = NUM_CANDIDATES
+        self.enable_optimality_check = enable_optimality_check
         self.r_sparse_indices_cpu = np.sort(np.array(r_sparse_indices, dtype=np.int32))
         self.R_SPARSE_LEN = len(self.r_sparse_indices_cpu)
 
@@ -178,28 +185,43 @@ class ArgmaxOperation:
 
         # Data requirements for optimality check 
         # Let z = [y, s] where s is the slack variables s>=0
-        device_factors = 'cpu' # Factors are always stored on CPU for now
-        # LU Factors of B_j
-        self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
-        # Pivots of B_j
-        self.basis_pivots_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.int32, device=device_factors)
-        # Basic Variable Lower Bounds of B_j
-        self.basis_lb_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
-        # Basic Variable Upper Bounds of B_j
-        self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
-        # Non-Basic Contribution of N_j . i.e. N@z_N
-        self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
+        if self.enable_optimality_check:
+            device_factors = 'cpu' # Factors are always stored on CPU for now
+            # LU Factors of B_j
+            self.basis_factors_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
+            # Pivots of B_j
+            self.basis_pivots_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch.int32, device=device_factors)
+            # Basic Variable Lower Bounds of B_j
+            self.basis_lb_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
+            # Basic Variable Upper Bounds of B_j
+            self.basis_ub_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
+            # Non-Basic Contribution of N_j . i.e. N@z_N
+            self.non_basic_contribution_cpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=optimality_dtype, device=device_factors)
+        else:
+            # Set to None when optimality checking is disabled
+            self.basis_factors_cpu = None
+            self.basis_pivots_cpu = None
+            self.basis_lb_cpu = None
+            self.basis_ub_cpu = None
+            self.non_basic_contribution_cpu = None
 
 
         # Current candidate solution
         self.current_x_gpu = torch.zeros(X_DIM, dtype=torch.float32, device=self.device)
 
         # --- Pending Factorizations for Batch Processing ---
-        self.pending_vbasis_list = []
-        self.pending_cbasis_list = []
-        self.pending_cpu_indices = []
-        self.has_pending_factorizations = False
-        self.D_gpu = None  # Will be initialized when first needed
+        if self.enable_optimality_check:
+            self.pending_vbasis_list = []
+            self.pending_cbasis_list = []
+            self.pending_cpu_indices = []
+            self.has_pending_factorizations = False
+            self.D_gpu = None  # Will be initialized when first needed
+        else:
+            self.pending_vbasis_list = None
+            self.pending_cbasis_list = None
+            self.pending_cpu_indices = None
+            self.has_pending_factorizations = False
+            self.D_gpu = None
 
         end_time = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] Initialization complete ({end_time - start_time:.2f}s).")
@@ -211,7 +233,8 @@ class ArgmaxOperation:
                          device: Optional[Union[str, torch.device]] = None,
                          NUM_CANDIDATES: int = 8,
                          optimality_dtype: torch.dtype = torch.float32,
-                         factorization_batch_size: int = 1000) -> 'ArgmaxOperation':
+                         factorization_batch_size: int = 1000,
+                         enable_optimality_check: bool = True) -> 'ArgmaxOperation':
         """
         Factory method to create an ArgmaxOperation instance from an SMPSReader.
 
@@ -224,6 +247,9 @@ class ArgmaxOperation:
             NUM_CANDIDATES: The number of top candidates to check for feasibility.
             optimality_dtype: The torch.dtype for storing basis factors. Defaults to torch.float32.
             factorization_batch_size: Number of basis matrices to process in each GPU batch. Defaults to 1000.
+            enable_optimality_check: Whether to enable optimality checking and feasibility 
+                                   verification. When False, skips basis factorization and
+                                   related memory allocations. Defaults to True.
 
         Returns:
             An initialized ArgmaxOperation instance.
@@ -268,7 +294,8 @@ class ArgmaxOperation:
             device=device,
             NUM_CANDIDATES=NUM_CANDIDATES,
             optimality_dtype=optimality_dtype,
-            factorization_batch_size=factorization_batch_size
+            factorization_batch_size=factorization_batch_size,
+            enable_optimality_check=enable_optimality_check
         )
 
     def _hash_basis_pair(self, vbasis: np.ndarray, cbasis: np.ndarray) -> str:
@@ -341,20 +368,22 @@ class ArgmaxOperation:
         self.short_pi_gpu[idx].copy_(torch.from_numpy(short_new_pi), non_blocking=is_cuda)
 
         # --- Queue for Batch Factorization ---
-        # Instead of immediate factorization, add to pending arrays for batch processing
-        self.pending_vbasis_list.append(new_vbasis.copy())
-        self.pending_cbasis_list.append(new_cbasis.copy())
-        self.pending_cpu_indices.append(idx)
-        self.has_pending_factorizations = True
+        # Skip factorization operations when optimality checking is disabled
+        if self.enable_optimality_check:
+            # Instead of immediate factorization, add to pending arrays for batch processing
+            self.pending_vbasis_list.append(new_vbasis.copy())
+            self.pending_cbasis_list.append(new_cbasis.copy())
+            self.pending_cpu_indices.append(idx)
+            self.has_pending_factorizations = True
 
-        # 3. Cache the bounds for the basic variables
-        lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
-        self.basis_lb_cpu[idx].copy_(torch.from_numpy(lb_B))
-        self.basis_ub_cpu[idx].copy_(torch.from_numpy(ub_B))
+            # 3. Cache the bounds for the basic variables
+            lb_B, ub_B = self._get_basic_variable_bounds(new_vbasis, new_cbasis)
+            self.basis_lb_cpu[idx].copy_(torch.from_numpy(lb_B))
+            self.basis_ub_cpu[idx].copy_(torch.from_numpy(ub_B))
 
-        # 4. Cache the contribution from non-basic variables (N @ z_N)
-        non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
-        self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
+            # 4. Cache the contribution from non-basic variables (N @ z_N)
+            non_basic_contribution = self._get_non_basic_contribution(new_vbasis)
+            self.non_basic_contribution_cpu[idx].copy_(torch.from_numpy(non_basic_contribution))
 
         # --- LRU bookkeeping ---
         # Update LRU manager and index map
@@ -451,7 +480,11 @@ class ArgmaxOperation:
         
         This method must be called after adding dual solutions and before calling
         find_optimal_basis_with_subset() to ensure all basis matrices are factorized.
+        When optimality checking is disabled, this method returns immediately.
         """
+        if not self.enable_optimality_check:
+            return  # Nothing to process when optimality checking is disabled
+            
         if not self.has_pending_factorizations:
             return  # Nothing to process
         
@@ -583,6 +616,9 @@ class ArgmaxOperation:
         Finds the best dual solution for a specific subset of scenarios with top-k candidates
         and feasibility checking. This method is optimized for warmstarting LP solvers.
         
+        When optimality checking is disabled, this method returns the argmax indices without
+        feasibility verification and sets all is_optimal flags to False.
+        
         Args:
             x: The first-stage decision vector (NumPy array, size X_DIM).
             scenario_indices: 1D array of scenario indices to process.
@@ -594,8 +630,9 @@ class ArgmaxOperation:
             - best_k_scores: The scores of the best dual for each processed scenario
             - best_k_indices: The indices of the best dual for each processed scenario  
             - is_optimal: Boolean array indicating feasibility for each processed scenario
+                         (always False when optimality checking is disabled)
         """
-        if self.has_pending_factorizations:
+        if self.enable_optimality_check and self.has_pending_factorizations:
             raise RuntimeError(
                 "Cannot perform optimal basis finding with pending factorizations. "
                 "Please call finalize_dual_additions() first to process all pending basis factorizations."
@@ -613,6 +650,10 @@ class ArgmaxOperation:
         # Validate scenario indices
         if np.any(scenario_indices < 0) or np.any(scenario_indices >= self.num_scenarios):
             raise ValueError("scenario_indices contains out-of-bounds values.")
+
+        # Fast path when optimality checking is disabled
+        if not self.enable_optimality_check:
+            return self._find_optimal_basis_fast_path(x, scenario_indices, touch_lru)
 
         # For now, process all scenarios (filtering can be added later when we have optimal scenario tracking)
         scenario_indices_to_process = scenario_indices.copy()
@@ -792,6 +833,70 @@ class ArgmaxOperation:
         if touch_lru:
             self.update_lru_on_access(selected_best_indices)
 
+        return selected_best_scores, selected_best_indices, selected_is_optimal
+
+    def _find_optimal_basis_fast_path(self, x: np.ndarray, scenario_indices: np.ndarray, 
+                                      touch_lru: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Fast path for find_optimal_basis_with_subset when optimality checking is disabled.
+        
+        Returns argmax indices without feasibility checking, and sets all is_optimal to False.
+        """
+        num_selected_scenarios = len(scenario_indices)
+        
+        # Pre-allocate result arrays
+        selected_best_scores = np.zeros(num_selected_scenarios, dtype=np.float32)
+        selected_best_indices = np.zeros(num_selected_scenarios, dtype=np.int64)
+        selected_is_optimal = np.zeros(num_selected_scenarios, dtype=bool)  # Always False
+        
+        with torch.no_grad():
+            # --- Prepare device data views ---
+            active_short_pi_gpu = self.short_pi_gpu[:self.num_pi]  # shape: (num_pi, short_delta_r_dim)
+            
+            self.current_x_gpu.copy_(torch.from_numpy(x))  # shape: (X_DIM,)
+            
+            # --- Precompute terms constant across ALL scenarios ---
+            Cx_gpu = torch.matmul(self.C_gpu, self.current_x_gpu)  # shape: (NUM_STAGE2_ROWS,)
+            h_bar_gpu = self.r_bar_gpu - Cx_gpu  # shape: (NUM_STAGE2_ROWS,)
+            
+            active_pi_gpu = self.pi_gpu[:self.num_pi]  # shape: (num_pi, NUM_STAGE2_ROWS)
+            active_rc_gpu = self.rc_gpu[:self.num_pi]  # shape: (num_pi, NUM_BOUNDED_VARS)
+            
+            pi_h_bar_term_all_k = torch.matmul(active_pi_gpu, h_bar_gpu)  # shape: (num_pi,)
+            
+            lambda_all_k = torch.clamp(active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
+            mu_all_k = torch.clamp(-active_rc_gpu, min=0)  # shape: (num_pi, NUM_BOUNDED_VARS)
+            lambda_l_term_all_k = torch.matmul(lambda_all_k, self.lb_gpu_f32)  # shape: (num_pi,)
+            mu_u_term_all_k = torch.matmul(mu_all_k, self.ub_gpu_f32)  # shape: (num_pi,)
+            constant_score_part_all_k = pi_h_bar_term_all_k - lambda_l_term_all_k + mu_u_term_all_k  # shape: (num_pi,)
+            
+            # --- Process selected scenarios in batches ---
+            num_batches = math.ceil(num_selected_scenarios / self.scenario_batch_size)
+            
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * self.scenario_batch_size
+                batch_end = min((batch_idx + 1) * self.scenario_batch_size, num_selected_scenarios)
+                
+                # Get scenario indices for this batch  
+                current_batch_scenario_indices = scenario_indices[batch_start:batch_end]
+                
+                # Extract scenario data for current batch
+                batch_scenario_slice = self.short_delta_r_gpu[current_batch_scenario_indices, :]  # shape: (batch_size, short_delta_r_dim)
+                
+                # --- Calculate Scores and Find Argmax ---
+                scores_batch = self._compute_scores_batch_core(batch_scenario_slice, active_short_pi_gpu, constant_score_part_all_k)
+                
+                # Find best (argmax only)
+                best_scores_batch, best_indices_batch = torch.max(scores_batch, dim=1)  # shapes: (batch_size,)
+                
+                # Store results
+                selected_best_scores[batch_start:batch_end] = best_scores_batch.cpu().numpy()
+                selected_best_indices[batch_start:batch_end] = best_indices_batch.cpu().numpy()
+                # selected_is_optimal remains all False
+        
+        if touch_lru:
+            self.update_lru_on_access(selected_best_indices)
+        
         return selected_best_scores, selected_best_indices, selected_is_optimal
 
     def calculate_cut_coefficients(self, pi_indices: np.ndarray) -> Tuple[float, np.ndarray]:

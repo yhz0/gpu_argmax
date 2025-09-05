@@ -69,7 +69,8 @@ class BendersSolver:
             MAX_PI=self.config['MAX_PI'],
             MAX_OMEGA=self.config['MAX_OMEGA'],
             scenario_batch_size=self.config['SCENARIO_BATCH_SIZE'],
-            NUM_CANDIDATES=self.config.get('NUM_CANDIDATES', 8)
+            NUM_CANDIDATES=self.config.get('NUM_CANDIDATES', 8),
+            enable_optimality_check=False   # TODO: remove after debugging
         )
         self.logger.info("ArgmaxOperation initialized.")
 
@@ -399,6 +400,7 @@ class BendersSolver:
         log_parts.append(f"LPScenarios: {log_metrics.get('num_lp_scenarios', 0)}")
         log_parts.append(f"CoverageFraction: {log_metrics.get('coverage_fraction', 0):.4f}")
         log_parts.append(f"Optimal%: {log_metrics.get('optimal_fraction', 0) * 100:.2f}%")
+        log_parts.append(f"delta_x_norm: {log_metrics.get('delta_x_norm', 0):.4f}")
         self.logger.info(" | ".join(log_parts))
 
     def run(self):
@@ -431,6 +433,9 @@ class BendersSolver:
                 break
             
             self.x_candidate = x_candidate
+            
+            delta_x_norm = np.linalg.norm(self.x_candidate - self.x_incumbent)
+            
 
             # Calculate perceived decrease
             perceived_decrease = self.master_problem.calculate_estimated_objective(self.x_incumbent) - \
@@ -562,7 +567,8 @@ class BendersSolver:
                 "fcd": fcd,
                 "successful_step": successful_step,
                 "num_lp_scenarios": len(selected_lp_scenarios),
-                "lp_selection_strategy": self.config.get('lp_scenario_selection_strategy', 'systematic')
+                "lp_selection_strategy": self.config.get('lp_scenario_selection_strategy', 'systematic'),
+                "delta_x_norm": delta_x_norm
             }
             self._log_iteration_data(iteration_metrics)
 
