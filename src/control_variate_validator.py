@@ -25,8 +25,8 @@ class ValidationResult:
         mu_q_hat: Control variate expectation μ_Q̂ from large sample
         delta: Correction term Δ from difference between exact and approximate values
         variance_reduction_ratio: Ratio showing variance reduction achieved (Var(D)/Var(Q))
-        sample_variance_q_hat: Sample variance s²_Q̂ from control variate
-        sample_variance_delta: Sample variance s²_D from correction terms
+        sample_std_q_hat: Sample standard deviation s_Q̂ from control variate
+        sample_std_delta: Sample standard deviation s_D from correction terms
         n1: Small sample size used for exact LP computation
         n2: Large sample size used for control variate computation
         confidence_level: Confidence level used (e.g., 0.95 for 95%)
@@ -34,6 +34,8 @@ class ValidationResult:
         total_computation_time: Total time taken for validation
         gpu_computation_time: Time spent on GPU computations
         lp_computation_time: Time spent on LP solves
+        x_incumbent: First-stage solution that was validated
+        first_stage_cost_vector: First-stage cost vector c
     """
     point_estimate: float
     confidence_interval: Tuple[float, float]
@@ -41,8 +43,8 @@ class ValidationResult:
     mu_q_hat: float
     delta: float
     variance_reduction_ratio: float
-    sample_variance_q_hat: float
-    sample_variance_delta: float
+    sample_std_q_hat: float
+    sample_std_delta: float
     n1: int
     n2: int
     confidence_level: float
@@ -50,6 +52,38 @@ class ValidationResult:
     total_computation_time: float
     gpu_computation_time: float
     lp_computation_time: float
+    x_incumbent: np.ndarray
+    first_stage_cost_vector: np.ndarray
+    
+    @property
+    def first_stage_cost(self) -> float:
+        """First-stage cost c^T x"""
+        return float(self.first_stage_cost_vector @ self.x_incumbent)
+    
+    @property
+    def expected_second_stage_cost(self) -> float:
+        """Expected second-stage cost E[Q(x,ω)]"""
+        return self.point_estimate
+    
+    @property
+    def expected_total_cost(self) -> float:
+        """Expected total cost c^T x + E[Q(x,ω)]"""
+        return self.first_stage_cost + self.expected_second_stage_cost
+    
+    @property
+    def confidence_interval_lower(self) -> float:
+        """Lower bound of confidence interval"""
+        return self.confidence_interval[0] + self.first_stage_cost
+    
+    @property
+    def confidence_interval_upper(self) -> float:
+        """Upper bound of confidence interval"""
+        return self.confidence_interval[1] + self.first_stage_cost
+    
+    @property
+    def confidence_interval_width(self) -> float:
+        """Width of confidence interval"""
+        return self.confidence_interval[1] - self.confidence_interval[0]
 
 
 class ControlVariateValidator:
@@ -137,7 +171,7 @@ class ControlVariateValidator:
         # Step 2: GPU control variate computation (large sample N2)
         logger.info(f"Computing control variate estimates using {N2} scenarios...")
         gpu_start = time.time()
-        mu_q_hat, sample_variance_q_hat, q_hat_omega1 = self._compute_control_variate_estimates(
+        mu_q_hat, sample_std_q_hat, q_hat_omega1 = self._compute_control_variate_estimates(
             x, short_delta_r_omega1, short_delta_r_omega2)
         gpu_time = time.time() - gpu_start
         
@@ -149,12 +183,12 @@ class ControlVariateValidator:
         
         # Step 4: Control variate calculation and correction
         logger.info("Computing correction term and final estimate...")
-        delta, sample_variance_delta, variance_reduction_ratio = self._compute_correction_term(
+        delta, sample_std_delta, variance_reduction_ratio = self._compute_correction_term(
             q_exact_omega1, q_hat_omega1)
         
         # Step 5: Final estimate and confidence interval
         point_estimate, confidence_interval, standard_error = self._compute_final_statistics(
-            mu_q_hat, delta, sample_variance_q_hat, sample_variance_delta, 
+            mu_q_hat, delta, sample_std_q_hat, sample_std_delta, 
             N1, N2, confidence_level)
         
         total_time = time.time() - start_time
@@ -166,19 +200,21 @@ class ControlVariateValidator:
             mu_q_hat=mu_q_hat,
             delta=delta,
             variance_reduction_ratio=variance_reduction_ratio,
-            sample_variance_q_hat=sample_variance_q_hat,
-            sample_variance_delta=sample_variance_delta,
+            sample_std_q_hat=sample_std_q_hat,
+            sample_std_delta=sample_std_delta,
             n1=N1,
             n2=N2,
             confidence_level=confidence_level,
             failed_lp_solves=failed_lp_count,
             total_computation_time=total_time,
             gpu_computation_time=gpu_time,
-            lp_computation_time=lp_time
+            lp_computation_time=lp_time,
+            x_incumbent=x.copy(),
+            first_stage_cost_vector=self.smps_reader.c.copy()
         )
         
-        logger.info(f"Validation complete in {total_time:.2f}s. Point estimate: {point_estimate:.4f}")
-        logger.info(f"Confidence interval ({confidence_level*100}%): [{confidence_interval[0]:.4f}, {confidence_interval[1]:.4f}]")
+        logger.info(f"Validation complete in {total_time:.2f}s. Second-stage value function E[Q(x,ω)]: {point_estimate:.4f}")
+        logger.info(f"Second-stage CI ({confidence_level*100}%): [{confidence_interval[0]:.4f}, {confidence_interval[1]:.4f}]")
         
         return result
 
@@ -226,9 +262,9 @@ class ControlVariateValidator:
             short_delta_r_omega2: Large sample scenarios for control variate
             
         Returns:
-            Tuple of (mu_q_hat, sample_variance_q_hat, q_hat_omega1)
+            Tuple of (mu_q_hat, sample_std_q_hat, q_hat_omega1)
             - mu_q_hat: Mean of control variate from large sample
-            - sample_variance_q_hat: Sample variance from large sample
+            - sample_std_q_hat: Sample standard deviation from large sample
             - q_hat_omega1: Control variate values for small sample (needed for correction)
         """
         # First, compute control variate for large sample N2 (for μ_Q̂)
@@ -243,9 +279,9 @@ class ControlVariateValidator:
         
         # Calculate μ_Q̂ using double precision arithmetic
         mu_q_hat = np.mean(q_hat_scores_omega2_fp64)
-        sample_variance_q_hat = np.var(q_hat_scores_omega2_fp64, ddof=1)  # Sample variance (N-1)
+        sample_std_q_hat = np.std(q_hat_scores_omega2_fp64, ddof=1)  # Sample standard deviation (N-1)
         
-        logger.debug(f"Control variate: μ_Q̂ = {mu_q_hat:.6f}, s²_Q̂ = {sample_variance_q_hat:.6f}")
+        logger.debug(f"Control variate: μ_Q̂ = {mu_q_hat:.6f}, s_Q̂ = {sample_std_q_hat:.6f}")
         
         # Now compute control variate for small sample N1 (for correction term)
         self.argmax_op.clear_scenarios()
@@ -257,7 +293,7 @@ class ControlVariateValidator:
         
         logger.debug(f"Computed Q̂ values: N2 sample mean = {mu_q_hat:.6f}, N1 sample size = {len(q_hat_omega1)}")
         
-        return mu_q_hat, sample_variance_q_hat, q_hat_omega1
+        return mu_q_hat, sample_std_q_hat, q_hat_omega1
 
     def _compute_exact_values(self, x: np.ndarray, short_delta_r_omega1: np.ndarray) -> Tuple[np.ndarray, int]:
         """
@@ -306,9 +342,9 @@ class ControlVariateValidator:
             q_hat_omega1: Approximate Q̂(x̄,ω) values from GPU computation
             
         Returns:
-            Tuple of (delta, sample_variance_delta, variance_reduction_ratio)
+            Tuple of (delta, sample_std_delta, variance_reduction_ratio)
             - delta: Correction term Δ = E[Q - Q̂]
-            - sample_variance_delta: Sample variance of differences
+            - sample_std_delta: Sample standard deviation of differences
             - variance_reduction_ratio: Var(Q-Q̂)/Var(Q) showing reduction achieved
         """
         # Handle failed LP solves by excluding them from correction calculation
@@ -322,17 +358,46 @@ class ControlVariateValidator:
         if len(q_exact_valid) < len(q_exact_omega1):
             logger.warning(f"Using {len(q_exact_valid)} valid scenarios out of {len(q_exact_omega1)} for correction")
         
+        # Monte Carlo statistics from exact LP values only
+        q_exact_mean = np.mean(q_exact_valid)
+        q_exact_std = np.std(q_exact_valid, ddof=1) if len(q_exact_valid) > 1 else 0.0
+        q_exact_se = q_exact_std / np.sqrt(len(q_exact_valid)) if len(q_exact_valid) > 1 else 0.0
+        
+        # What would be the 95% CI if using only exact LP values (traditional Monte Carlo)
+        if len(q_exact_valid) > 1:
+            from scipy import stats
+            alpha = 0.05  # For 95% confidence
+            t_critical = stats.t.ppf(1.0 - alpha/2, df=len(q_exact_valid)-1)  # Use t-distribution for small samples
+            mc_margin = t_critical * q_exact_se
+            mc_ci_lower = q_exact_mean - mc_margin
+            mc_ci_upper = q_exact_mean + mc_margin
+        else:
+            mc_ci_lower = mc_ci_upper = q_exact_mean
+            
+        logger.info(f"Monte Carlo statistics from exact LP values:")
+        logger.info(f"  Mean: {q_exact_mean:.6f}")
+        logger.info(f"  Standard deviation: {q_exact_std:.6f}")
+        logger.info(f"  Sample size: {len(q_exact_valid)}")
+        logger.info(f"  Standard error: {q_exact_se:.6f}")
+        if len(q_exact_valid) > 1:
+            logger.info(f"  Traditional MC CI (95%): [{mc_ci_lower:.6f}, {mc_ci_upper:.6f}]")
+            logger.info(f"  Traditional MC CI width: {mc_ci_upper - mc_ci_lower:.6f}")
+        else:
+            logger.info(f"  Traditional MC CI: Not available (sample size = 1)")
+        
         # Calculate differences D = Q(x̄,ω) - Q̂(x̄,ω)
         differences = q_exact_valid - q_hat_valid
         
         # Correction term: Δ = (1/N₁) Σ D_i
         delta = np.mean(differences)
         
-        # Sample variance of differences
-        sample_variance_delta = np.var(differences, ddof=1) if len(differences) > 1 else 0.0
+        # Sample standard deviation of differences
+        sample_std_delta = np.std(differences, ddof=1) if len(differences) > 1 else 0.0
         
-        # Calculate variance reduction ratio: Var(D)/Var(Q)
+        # Calculate variance reduction ratio: Var(D)/Var(Q) 
+        # Note: We still compute variances for the ratio calculation as it's a variance-based metric
         sample_variance_q = np.var(q_exact_valid, ddof=1) if len(q_exact_valid) > 1 else 1.0
+        sample_variance_delta = sample_std_delta ** 2  # Convert back to variance for ratio
         variance_reduction_ratio = sample_variance_delta / sample_variance_q if sample_variance_q > 0 else 0.0
         
         # Debug output to understand the differences
@@ -340,21 +405,21 @@ class ControlVariateValidator:
         logger.info(f"  Min difference: {np.min(differences):.6f}")
         logger.info(f"  Max difference: {np.max(differences):.6f}")
         logger.info(f"  Mean difference (Δ): {delta:.6f}")
-        logger.info(f"  Std of differences: {np.sqrt(sample_variance_delta):.6f}")
+        logger.info(f"  Std of differences: {sample_std_delta:.6f}")
         logger.info(f"  Sample size for correction: {len(differences)}")
-        logger.info(f"  Q variance: {sample_variance_q:.6f}")
-        logger.info(f"  D variance: {sample_variance_delta:.6f}")
+        logger.info(f"  Q standard deviation: {np.sqrt(sample_variance_q):.6f}")
+        logger.info(f"  D standard deviation: {sample_std_delta:.6f}")
         
-        logger.debug(f"Correction term: Δ = {delta:.6f}, s²_D = {sample_variance_delta:.6f}")
+        logger.debug(f"Correction term: Δ = {delta:.6f}, s_D = {sample_std_delta:.6f}")
         logger.debug(f"Variance reduction ratio: {variance_reduction_ratio:.6f} (lower is better)")
         
-        return delta, sample_variance_delta, variance_reduction_ratio
+        return delta, sample_std_delta, variance_reduction_ratio
 
     def _compute_final_statistics(self, 
                                  mu_q_hat: float, 
                                  delta: float,
-                                 sample_variance_q_hat: float,
-                                 sample_variance_delta: float,
+                                 sample_std_q_hat: float,
+                                 sample_std_delta: float,
                                  N1: int,
                                  N2: int,
                                  confidence_level: float) -> Tuple[float, Tuple[float, float], float]:
@@ -364,8 +429,8 @@ class ControlVariateValidator:
         Args:
             mu_q_hat: Control variate expectation
             delta: Correction term
-            sample_variance_q_hat: Sample variance of control variate
-            sample_variance_delta: Sample variance of correction terms
+            sample_std_q_hat: Sample standard deviation of control variate
+            sample_std_delta: Sample standard deviation of correction terms
             N1: Small sample size
             N2: Large sample size
             confidence_level: Confidence level (e.g., 0.95)
@@ -377,7 +442,8 @@ class ControlVariateValidator:
         point_estimate = mu_q_hat + delta
         
         # Standard error: SE = √(s²_Q̂/N₂ + s²_D/N₁)
-        standard_error = np.sqrt(sample_variance_q_hat / N2 + sample_variance_delta / N1)
+        # Convert standard deviations back to variances for SE calculation
+        standard_error = np.sqrt((sample_std_q_hat ** 2) / N2 + (sample_std_delta ** 2) / N1)
         
         # Confidence interval using normal distribution
         alpha = 1.0 - confidence_level

@@ -18,6 +18,7 @@ from src.argmax_operation import ArgmaxOperation
 # from src.benders import BendersMasterProblem # For type hinting if Regularized inherits from it
 from src.regularized_benders import RegularizedBendersMasterProblem
 from src.parallel_second_stage_worker import ParallelSecondStageWorker
+from src.control_variate_validator import ControlVariateValidator
 
 class BendersSolver:
     """
@@ -39,6 +40,7 @@ class BendersSolver:
         self.argmax_op: ArgmaxOperation = None
         self.master_problem: RegularizedBendersMasterProblem = None
         self.parallel_worker: ParallelSecondStageWorker = None
+        self.validator: ControlVariateValidator = None
         
         self.x_init: np.ndarray = None
         self.x_candidate: np.ndarray = None
@@ -90,6 +92,14 @@ class BendersSolver:
             num_workers=num_workers_for_parallel
         )
         self.logger.info(f"ParallelSecondStageWorker initialized with {self.parallel_worker.num_workers} workers.")
+
+        # 4.5. Initialize ControlVariateValidator
+        self.validator = ControlVariateValidator(
+            smps_reader=self.reader,
+            argmax_op=self.argmax_op,
+            parallel_worker=self.parallel_worker
+        )
+        self.logger.info("ControlVariateValidator initialized.")
 
         # 5. Generate Sample Pool (short_delta_r)
         # set seed for reproducibility
@@ -403,6 +413,105 @@ class BendersSolver:
         log_parts.append(f"delta_x_norm: {log_metrics.get('delta_x_norm', 0):.4f}")
         self.logger.info(" | ".join(log_parts))
 
+    def _validate_incumbent_solution(self):
+        """
+        Validates the incumbent solution using control variate variance reduction.
+        Outputs brief summary to console and detailed results to log file.
+        """
+        if self.validator is None or self.x_incumbent is None:
+            self.logger.warning("Cannot validate: validator not initialized or no incumbent solution.")
+            return
+        
+        # Get validation parameters from config with large default values
+        N1 = self.config.get('validation_N1', 50000)  # Number of LP solves
+        N2 = self.config.get('validation_N2', min(1000000, self.argmax_op.MAX_OMEGA))  # Number of GPU evaluations
+        confidence_level = self.config.get('validation_confidence_level', 0.95)
+        validation_seed = self.config.get('validation_seed', 12345)
+        
+        self.logger.info("--- Starting Solution Validation ---")
+        
+        # Brief console summary
+        self.logger.info(f"Validating incumbent solution using control variate method...")
+        self.logger.info(f"Configuration: N1={N1:,} LP solves, N2={N2:,} GPU evaluations, {confidence_level*100}% confidence")
+        
+        try:
+            validation_start_time = time.time()
+            result = self.validator.validate_solution(
+                x=self.x_incumbent,
+                N1=N1,
+                N2=N2,
+                confidence_level=confidence_level,
+                seed=validation_seed
+            )
+            validation_time = time.time() - validation_start_time
+            
+            # Brief console output
+            self.logger.info(f"Validation completed successfully in {validation_time:.2f}s")
+            self.logger.info(f"Expected total cost (c^T x + E[Q(x,ω)]): {result.expected_total_cost:.6f} [{result.confidence_interval_lower:.6f}, {result.confidence_interval_upper:.6f}]")
+            self.logger.info(f"Total cost CI width: {result.confidence_interval_width:.6f}")
+            if result.variance_reduction_ratio is not None:
+                self.logger.info(f"Variance reduction achieved: {result.variance_reduction_ratio*100:.2f}%")
+            
+            # Write detailed results to log file
+            log_dir = Path(self.config.get('log_dir', 'logs'))
+            log_dir.mkdir(exist_ok=True)
+            
+            # Generate log filename with timestamp
+            problem_name = getattr(self.reader, 'problem_name', 'unknown')
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            log_filename = f"validation_{problem_name}_{timestamp}.log"
+            log_path = log_dir / log_filename
+            
+            with open(log_path, 'w') as f:
+                f.write("=== Control Variate Validation Results ===\n\n")
+                f.write(f"Validation completed on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Problem: {problem_name}\n")
+                f.write(f"Total validation time: {validation_time:.2f}s\n\n")
+                
+                f.write("=== Configuration ===\n")
+                f.write(f"N1 (LP solves): {N1:,}\n")
+                f.write(f"N2 (GPU evaluations): {N2:,}\n")
+                f.write(f"Confidence level: {confidence_level*100}%\n")
+                f.write(f"Random seed: {validation_seed}\n\n")
+                
+                f.write("=== Incumbent Solution ===\n")
+                f.write(f"x_incumbent: {result.x_incumbent.tolist()}\n\n")
+                
+                f.write("=== Main Results ===\n")
+                f.write(f"Expected total cost E[c^T x + Q(x,ω)]: {result.expected_total_cost:.10f}\n")
+                f.write(f"Standard error: {result.standard_error:.10f}\n")
+                f.write(f"Confidence interval ({confidence_level*100}%): [{result.confidence_interval_lower:.10f}, {result.confidence_interval_upper:.10f}]\n")
+                f.write(f"Confidence interval width: {result.confidence_interval_width:.10f}\n\n")
+                
+                f.write("=== Cost Breakdown ===\n")
+                f.write(f"First-stage cost (c^T x): {result.first_stage_cost:.10f}\n")
+                f.write(f"Expected second-stage cost E[Q(x,ω)]: {result.expected_second_stage_cost:.10f}\n\n")
+                
+                f.write("=== Control Variate Statistics ===\n")
+                f.write(f"μ_Q̂ (GPU expectation): {result.mu_q_hat:.10f}\n")
+                f.write(f"Δ (correction term): {result.delta:.10f}\n")
+                f.write(f"Sample standard deviation of Q̂: {result.sample_std_q_hat:.10f}\n")
+                f.write(f"Sample standard deviation of Δ: {result.sample_std_delta:.10f}\n")
+                if result.variance_reduction_ratio is not None:
+                    f.write(f"Variance reduction ratio: {result.variance_reduction_ratio:.6f} ({result.variance_reduction_ratio*100:.2f}%)\n")
+                else:
+                    f.write("Variance reduction ratio: N/A (MC comparison not computed)\n")
+                
+                f.write(f"\n=== Sample Sizes ===\n")
+                f.write(f"N1 (exact LP solves): {result.n1:,}\n")
+                f.write(f"N2 (GPU approximations): {result.n2:,}\n")
+                f.write(f"Total function evaluations: {result.n1 + result.n2:,}\n")
+                
+                f.write(f"\n=== Performance ===\n")
+                f.write(f"Total validation time: {validation_time:.2f}s\n")
+                f.write(f"Time per evaluation: {validation_time/(result.n1 + result.n2)*1000:.3f}ms\n")
+            
+            self.logger.info(f"Detailed validation results written to: {log_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Validation failed with error: {e}", exc_info=True)
+            self.logger.warning("Continuing without validation...")
+
     def run(self):
         """
         Executes the Benders decomposition algorithm with an incumbent-based strategy.
@@ -576,6 +685,11 @@ class BendersSolver:
                 self.logger.info("Reached maximum iterations.")
 
         self.logger.info("--- Benders Decomposition Loop Finished ---")
+        
+        # Validate the incumbent solution
+        if self.config.get('enable_validation', True):
+            self._validate_incumbent_solution()
+        
         self.cleanup()
 
     def cleanup(self):

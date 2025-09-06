@@ -45,7 +45,8 @@ class ArgmaxOperation:
                  NUM_CANDIDATES: int = 8,
                  optimality_dtype: torch.dtype = torch.float32,
                  factorization_batch_size: int = 1000,
-                 enable_optimality_check: bool = True
+                 enable_optimality_check: bool = True,
+                 allow_tf32: bool = True
                  ):
         """
         Initializes the ArgmaxOperation class.
@@ -73,6 +74,9 @@ class ArgmaxOperation:
             enable_optimality_check: Whether to enable optimality checking and feasibility 
                                    verification. When False, skips basis factorization and
                                    related memory allocations. Defaults to True.
+            allow_tf32: Whether to enable TF32 tensor cores for CUDA operations. 
+                        Improves performance on Ampere and newer GPUs but may reduce 
+                        numerical precision. Defaults to True.
         """
         print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
         start_time = time.time()
@@ -86,12 +90,8 @@ class ArgmaxOperation:
         
         print(f"[{time.strftime('%H:%M:%S')}] Using device: {self.device}")
 
-        # --- Enable TF32 for float types on CUDA ---
-        if (self.device.type == 'cuda' and 
-            optimality_dtype in [torch.float32, torch.float16, torch.bfloat16]):
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            print(f"[{time.strftime('%H:%M:%S')}] Enabled TF32 for {optimality_dtype}")
+        # --- Configure TF32 ---
+        self._configure_tf32(allow_tf32)
 
         # --- Input Validation ---
         if r_bar.shape != (NUM_STAGE2_ROWS,): raise ValueError("r_bar shape mismatch.")
@@ -297,6 +297,24 @@ class ArgmaxOperation:
             factorization_batch_size=factorization_batch_size,
             enable_optimality_check=enable_optimality_check
         )
+
+    def _configure_tf32(self, enable_tf32: bool) -> None:
+        """
+        Configure TF32 tensor cores for CUDA operations.
+        
+        TF32 (TensorFloat-32) provides faster computation on Ampere and newer GPUs
+        but with slightly reduced numerical precision compared to full float32.
+        
+        Args:
+            enable_tf32: Whether to enable TF32 acceleration
+        """
+        # Enable TF32 for compatible CUDA operations
+        if self.device.type == 'cuda':
+            torch.backends.cuda.matmul.allow_tf32 = enable_tf32
+            torch.backends.cudnn.allow_tf32 = enable_tf32
+            print(f"[{time.strftime('%H:%M:%S')}] {'Enabled' if enable_tf32 else 'Disabled'} TF32")
+        else:
+            print(f"[{time.strftime('%H:%M:%S')}] TF32 configuration not applicable for device type {self.device.type}")
 
     def _hash_basis_pair(self, vbasis: np.ndarray, cbasis: np.ndarray) -> str:
         basis_np_dtype = np.int8

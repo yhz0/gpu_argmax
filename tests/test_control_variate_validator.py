@@ -355,8 +355,8 @@ class TestControlVariateValidator(unittest.TestCase):
         # Variance reduction comparison
         print(f"Variance Analysis:")
         print(f"  Monte Carlo variance:      {mc_result['sample_variance']:.0f}")
-        print(f"  CV({num_limited_points}) s²_D:                {cv_limited.sample_variance_delta:.6f}")
-        print(f"  CV({num_full_points}) s²_D:               {cv_full.sample_variance_delta:.6f}")
+        print(f"  CV({num_limited_points}) s_D:                {cv_limited.sample_std_delta:.6f}")
+        print(f"  CV({num_full_points}) s_D:               {cv_full.sample_std_delta:.6f}")
         print(f"  CV({num_limited_points}) reduction ratio:     {cv_limited.variance_reduction_ratio:.6f}")
         print(f"  CV({num_full_points}) reduction ratio:    {cv_full.variance_reduction_ratio:.6f}")
         print()
@@ -483,8 +483,8 @@ class TestControlVariateValidator(unittest.TestCase):
         # Variance analysis
         print(f"Variance Analysis:")
         print(f"  Monte Carlo variance:        {mc_result['sample_variance']:.6f}")
-        print(f"  Control variate s²_Q̂:        {cv_result.sample_variance_q_hat:.6f}")
-        print(f"  Control variate s²_D:        {cv_result.sample_variance_delta:.6f}")
+        print(f"  Control variate s_Q̂:        {cv_result.sample_std_q_hat:.6f}")
+        print(f"  Control variate s_D:        {cv_result.sample_std_delta:.6f}")
         print(f"  Variance reduction ratio:    {cv_result.variance_reduction_ratio:.6f}")
         if cv_result.variance_reduction_ratio < 0.5:
             print("  ✓ Good variance reduction achieved (ratio < 0.5)")

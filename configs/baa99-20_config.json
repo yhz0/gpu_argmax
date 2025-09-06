@@ -2,7 +2,7 @@
     "smps_core_file": "./smps_data/baa99-20/baa99-20.mps",
     "smps_time_file": "./smps_data/baa99-20/baa99-20.tim",
     "smps_sto_file": "./smps_data/baa99-20/baa99-20.sto",
-    "input_h5_basis_file": "./baa99-20_1000scen_results.h5",
+    "input_h5_basis_file": "./baa99-20_100scen_results.h5",
     "MAX_PI": 500000,
     "MAX_OMEGA": 1000000,
     "SCENARIO_BATCH_SIZE": 1000,

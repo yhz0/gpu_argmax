@@ -18,7 +18,7 @@
     "max_iterations": 300,
     "num_duals_to_add_per_iteration": 5000,
     "argmax_tol_cutoff": 1e-3,
-    "primal_feas_tol": 1e-2,
+    "primal_feas_tol": 1e-3,
     "num_lp_scenarios_per_iteration": 10000,
     "lp_scenario_selection_strategy": "systematic",
     "num_workers": 192,
