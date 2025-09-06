@@ -249,12 +249,55 @@ class ControlVariateValidator:
         
         return short_delta_r_omega1, short_delta_r_omega2
 
+    def _compute_control_variate_batched(self,
+                                        x: np.ndarray,
+                                        short_delta_r_scenarios: np.ndarray) -> np.ndarray:
+        """
+        Compute control variate estimates in batches for large scenario sets.
+        
+        Args:
+            x: First-stage solution vector
+            short_delta_r_scenarios: Scenario data array of shape (N, R_SPARSE_LEN)
+            
+        Returns:
+            Array of control variate values (scores) for all scenarios
+        """
+        batch_size = self.argmax_op.MAX_OMEGA
+        num_scenarios = short_delta_r_scenarios.shape[0]
+        
+        if num_scenarios <= batch_size:
+            # Single batch processing
+            self.argmax_op.clear_scenarios()
+            self.argmax_op.add_scenarios(short_delta_r_scenarios)
+            _, scores = self.argmax_op.find_optimal_basis_fast(x, touch_lru=False)
+            return scores.astype(np.float64)
+        
+        # Multi-batch processing
+        logger.info(f"Processing {num_scenarios} scenarios in batches of {batch_size}")
+        all_scores = []
+        
+        for batch_start in range(0, num_scenarios, batch_size):
+            batch_end = min(batch_start + batch_size, num_scenarios)
+            batch_scenarios = short_delta_r_scenarios[batch_start:batch_end]
+            
+            logger.debug(f"Processing batch {batch_start//batch_size + 1}: scenarios {batch_start+1}-{batch_end}")
+            
+            # Process this batch
+            self.argmax_op.clear_scenarios()
+            self.argmax_op.add_scenarios(batch_scenarios)
+            _, batch_scores = self.argmax_op.find_optimal_basis_fast(x, touch_lru=False)
+            
+            all_scores.append(batch_scores.astype(np.float64))
+        
+        # Concatenate all batch results
+        return np.concatenate(all_scores)
+
     def _compute_control_variate_estimates(self, 
                                           x: np.ndarray, 
                                           short_delta_r_omega1: np.ndarray,
                                           short_delta_r_omega2: np.ndarray) -> Tuple[float, float, np.ndarray]:
         """
-        Compute control variate estimates using GPU acceleration.
+        Compute control variate estimates using GPU acceleration with batching support.
         
         Args:
             x: First-stage solution vector
@@ -267,15 +310,19 @@ class ControlVariateValidator:
             - sample_std_q_hat: Sample standard deviation from large sample
             - q_hat_omega1: Control variate values for small sample (needed for correction)
         """
-        # First, compute control variate for large sample N2 (for μ_Q̂)
-        self.argmax_op.clear_scenarios()
-        self.argmax_op.add_scenarios(short_delta_r_omega2)
+        N1 = short_delta_r_omega1.shape[0]
+        N2 = short_delta_r_omega2.shape[0]
+        max_omega = self.argmax_op.MAX_OMEGA
         
-        # Get Q̂ values (scores) from GPU computation
-        _, q_hat_scores_omega2 = self.argmax_op.find_optimal_basis_fast(x, touch_lru=False)
+        # Log batch processing information
+        if N2 > max_omega:
+            logger.info(f"N2={N2} exceeds MAX_OMEGA={max_omega}. Using batched processing for large sample.")
+        if N1 > max_omega:
+            logger.info(f"N1={N1} exceeds MAX_OMEGA={max_omega}. Using batched processing for small sample.")
         
-        # Convert to double precision for numerical stability as recommended in paper
-        q_hat_scores_omega2_fp64 = q_hat_scores_omega2.astype(np.float64)
+        # Compute control variate for large sample N2 (for μ_Q̂) using batching
+        logger.debug(f"Computing control variate for N2={N2} scenarios")
+        q_hat_scores_omega2_fp64 = self._compute_control_variate_batched(x, short_delta_r_omega2)
         
         # Calculate μ_Q̂ using double precision arithmetic
         mu_q_hat = np.mean(q_hat_scores_omega2_fp64)
@@ -283,13 +330,9 @@ class ControlVariateValidator:
         
         logger.debug(f"Control variate: μ_Q̂ = {mu_q_hat:.6f}, s_Q̂ = {sample_std_q_hat:.6f}")
         
-        # Now compute control variate for small sample N1 (for correction term)
-        self.argmax_op.clear_scenarios()
-        self.argmax_op.add_scenarios(short_delta_r_omega1)
-        
-        # Get Q̂ values for small sample
-        _, q_hat_scores_omega1 = self.argmax_op.find_optimal_basis_fast(x, touch_lru=False)
-        q_hat_omega1 = q_hat_scores_omega1.astype(np.float64)
+        # Compute control variate for small sample N1 (for correction term) using batching
+        logger.debug(f"Computing control variate for N1={N1} scenarios")
+        q_hat_omega1 = self._compute_control_variate_batched(x, short_delta_r_omega1)
         
         logger.debug(f"Computed Q̂ values: N2 sample mean = {mu_q_hat:.6f}, N1 sample size = {len(q_hat_omega1)}")
         

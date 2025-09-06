@@ -513,6 +513,105 @@ class TestControlVariateValidator(unittest.TestCase):
         else:
             print(f"  ✓ Control variate faster by {1/speedup:.2f}x")
 
+    def test_batching_functionality(self):
+        """
+        Test that the batching functionality works correctly by comparing results
+        between batched and non-batched processing for the same scenarios.
+        """
+        print("\n" + "="*70)
+        print("Testing Batching Functionality")
+        print("="*70)
+        
+        # Use small sample sizes for test
+        N1_small = 50
+        N2_small = 200
+        confidence_level = 0.95
+        test_seed = 42
+        
+        print(f"Testing with N1={N1_small}, N2={N2_small}")
+        
+        # First, test with normal MAX_OMEGA (should not use batching)
+        print("1. Running validation with normal MAX_OMEGA (no batching expected)...")
+        normal_result = self.validator.validate_solution(
+            x=self.x_optimal,
+            N1=N1_small,
+            N2=N2_small,
+            confidence_level=confidence_level,
+            seed=test_seed
+        )
+        
+        # Create a new ArgmaxOperation with very small MAX_OMEGA to force batching
+        print("2. Creating ArgmaxOperation with small MAX_OMEGA to force batching...")
+        small_omega_argmax = ArgmaxOperation.from_smps_reader(
+            reader=self.reader,
+            MAX_PI=200,
+            MAX_OMEGA=25,  # Very small to force batching
+            enable_optimality_check=False
+        )
+        
+        # Add the same dual solutions
+        added_count = 0
+        for i in range(min(100, self.num_scenarios_h5)):  # Add first 100 for test
+            pi_i = self.pi_s[i, :]  
+            rc_i = np.zeros(small_omega_argmax.NUM_BOUNDED_VARS, dtype=np.float32)  
+            vbasis_i = self.vbasis_y_all[i, :].astype(np.int8)  
+            cbasis_i = self.cbasis_y_all[i, :].astype(np.int8)  
+            
+            was_added = small_omega_argmax.add_pi(pi_i, rc_i, vbasis_i, cbasis_i)
+            if was_added:
+                added_count += 1
+                
+        print(f"Added {added_count} dual solutions to small MAX_OMEGA ArgmaxOperation")
+        
+        # Create validator with small MAX_OMEGA
+        small_omega_validator = ControlVariateValidator(
+            argmax_op=small_omega_argmax,
+            parallel_worker=self.parallel_worker,
+            smps_reader=self.reader
+        )
+        
+        print("3. Running validation with small MAX_OMEGA (batching expected)...")
+        batched_result = small_omega_validator.validate_solution(
+            x=self.x_optimal,
+            N1=N1_small,
+            N2=N2_small,
+            confidence_level=confidence_level,
+            seed=test_seed
+        )
+        
+        # Compare results
+        print("\n" + "="*50)
+        print("COMPARISON: Normal vs Batched Processing")
+        print("="*50)
+        
+        print(f"Normal processing:")
+        print(f"  Expected second-stage cost: {normal_result.expected_second_stage_cost:.6f}")
+        print(f"  Standard error: {normal_result.standard_error:.6f}")
+        print(f"  CI width: {normal_result.confidence_interval_width:.6f}")
+        print(f"  Variance reduction ratio: {normal_result.variance_reduction_ratio:.6f}")
+        
+        print(f"\nBatched processing:")
+        print(f"  Expected second-stage cost: {batched_result.expected_second_stage_cost:.6f}")
+        print(f"  Standard error: {batched_result.standard_error:.6f}")
+        print(f"  CI width: {batched_result.confidence_interval_width:.6f}")
+        print(f"  Variance reduction ratio: {batched_result.variance_reduction_ratio:.6f}")
+        
+        # Results should be very close (within reasonable tolerance due to same seed)
+        cost_diff = abs(normal_result.expected_second_stage_cost - batched_result.expected_second_stage_cost)
+        relative_diff = cost_diff / abs(normal_result.expected_second_stage_cost)
+        
+        print(f"\nDifference analysis:")
+        print(f"  Absolute cost difference: {cost_diff:.6f}")
+        print(f"  Relative difference: {relative_diff:.6%}")
+        
+        # Assert that the results are reasonably close
+        # Allow for small numerical differences due to batching order
+        self.assertLess(relative_diff, 0.05, 
+                       f"Batched and normal processing results differ by more than 5%: {relative_diff:.6%}")
+        
+        print(f"\n✓ Batching test passed! Results are within 5% tolerance.")
+        print("="*70)
+
     @classmethod
     def tearDownClass(cls):
         """Clean up resources."""
