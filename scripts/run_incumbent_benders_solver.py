@@ -141,7 +141,8 @@ class BendersSolver:
                 else:
                     self.logger.warning(f"Initial duals/basis not fully found in {h5_path}. ArgmaxOperation may start with no preloaded duals.")
 
-            self.logger.info("Factorizing initial basis.")
+            if self.argmax_op.enable_optimality_check:
+                self.logger.info("Factorizing initial basis.")
             self.argmax_op.finalize_dual_additions()
         
         except Exception as e:

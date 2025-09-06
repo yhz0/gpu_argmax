@@ -4,6 +4,7 @@ import scipy.sparse # For type hint
 import hashlib
 import time
 import math
+import logging
 from typing import Tuple, Optional, Union, TYPE_CHECKING
 from cachetools import LRUCache
 # from memory_monitor import MemoryMonitor # TODO: remove after debugging
@@ -78,7 +79,8 @@ class ArgmaxOperation:
                         Improves performance on Ampere and newer GPUs but may reduce 
                         numerical precision. Defaults to True.
         """
-        print(f"[{time.strftime('%H:%M:%S')}] Initializing ArgmaxOperation...")
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("Initializing ArgmaxOperation...")
         start_time = time.time()
 
         # --- Determine Device ---
@@ -88,7 +90,7 @@ class ArgmaxOperation:
             self.device = torch.device(device)
 
         
-        print(f"[{time.strftime('%H:%M:%S')}] Using device: {self.device}")
+        self.logger.info(f"Using device: {self.device}")
 
         # --- Configure TF32 ---
         self._configure_tf32(allow_tf32)
@@ -102,7 +104,7 @@ class ArgmaxOperation:
         if not isinstance(r_sparse_indices, np.ndarray) or r_sparse_indices.ndim != 1: raise ValueError("r_sparse_indices must be 1D.")
         unique_r_indices = np.unique(r_sparse_indices)
         if len(unique_r_indices) != len(r_sparse_indices):
-            print("Warning: r_sparse_indices contains duplicate values. Using unique indices.")
+            self.logger.warning("r_sparse_indices contains duplicate values. Using unique indices.")
             r_sparse_indices = unique_r_indices
         if np.any(r_sparse_indices < 0) or np.any(r_sparse_indices >= NUM_STAGE2_ROWS): raise ValueError("r_sparse_indices out of bounds.")
         if not scipy.sparse.issparse(C): raise TypeError("C must be a SciPy sparse matrix.")
@@ -134,7 +136,7 @@ class ArgmaxOperation:
         self.index_to_hash_map = {}  # Maps index to basis hash for quick lookup
 
         # --- CPU Data Storage (Only Basis) ---
-        print(f"[{time.strftime('%H:%M:%S')}] Allocating CPU memory for basis...")
+        self.logger.info("Allocating CPU memory for basis...")
         basis_dtype_np = np.int8 # Compact storage for basis status
         self.vbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_VARS), dtype=basis_dtype_np)
         self.cbasis_cpu = np.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=basis_dtype_np)
@@ -150,7 +152,7 @@ class ArgmaxOperation:
         self.NUM_BOUNDED_VARS = len(lb_y_bounded)
 
         # --- GPU (Device) Data Storage ---
-        print(f"[{time.strftime('%H:%M:%S')}] Allocating memory on device {self.device}...")
+        self.logger.info(f"Allocating memory on device {self.device}...")
         torch_dtype = torch.float32 # Default dtype for most device tensors
 
         self.pi_gpu = torch.zeros((MAX_PI, NUM_STAGE2_ROWS), dtype=torch_dtype, device=self.device)
@@ -224,7 +226,7 @@ class ArgmaxOperation:
             self.D_gpu = None
 
         end_time = time.time()
-        print(f"[{time.strftime('%H:%M:%S')}] Initialization complete ({end_time - start_time:.2f}s).")
+        self.logger.info(f"Initialization complete ({end_time - start_time:.2f}s).")
 
     @classmethod
     def from_smps_reader(cls, reader: 'SMPSReader',
@@ -312,9 +314,9 @@ class ArgmaxOperation:
         if self.device.type == 'cuda':
             torch.backends.cuda.matmul.allow_tf32 = enable_tf32
             torch.backends.cudnn.allow_tf32 = enable_tf32
-            print(f"[{time.strftime('%H:%M:%S')}] {'Enabled' if enable_tf32 else 'Disabled'} TF32")
+            self.logger.info(f"{'Enabled' if enable_tf32 else 'Disabled'} TF32")
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] TF32 configuration not applicable for device type {self.device.type}")
+            self.logger.info(f"TF32 configuration not applicable for device type {self.device.type}")
 
     def _hash_basis_pair(self, vbasis: np.ndarray, cbasis: np.ndarray) -> str:
         basis_np_dtype = np.int8
@@ -469,14 +471,14 @@ class ArgmaxOperation:
         num_new_scenarios = new_short_r_delta.shape[0]
         available_slots = self.MAX_OMEGA - self.num_scenarios
         if num_new_scenarios <= 0 or available_slots <= 0:
-            # print(f"Debug: No new scenarios to add or no available slots. New: {num_new_scenarios}, Available: {available_slots}")
+            self.logger.error(f"No new scenarios to add or no available slots. New: {num_new_scenarios}, Available: {available_slots}")
             return False
 
         num_to_add = min(num_new_scenarios, available_slots)
         
         new_short_r_delta_to_add = new_short_r_delta # Placeholder for slicing
         if num_to_add < num_new_scenarios:
-            print(f"Warning: Exceeds MAX_OMEGA. Adding only {num_to_add} of {num_new_scenarios} new scenarios.")
+            self.logger.warning(f"Exceeds MAX_OMEGA. Adding only {num_to_add} of {num_new_scenarios} new scenarios.")
             # Slicing rows from the input
             new_short_r_delta_to_add = new_short_r_delta[:num_to_add, :]
         else:
@@ -520,7 +522,7 @@ class ArgmaxOperation:
         if not self.has_pending_factorizations:
             return  # Nothing to process
         
-        # print(f"[{time.strftime('%H:%M:%S')}] Processing {len(self.pending_vbasis_list)} pending factorizations...")
+        self.logger.info(f"Processing {len(self.pending_vbasis_list)} pending factorizations...")
         start_time = time.time()
         
         # Initialize D matrix on GPU if needed
@@ -554,7 +556,7 @@ class ArgmaxOperation:
         self.has_pending_factorizations = False
         
         end_time = time.time()
-        # print(f"[{time.strftime('%H:%M:%S')}] Completed {total_processed} factorizations in {end_time - start_time:.2f}s")
+        self.logger.debug(f"Completed {total_processed} factorizations in {end_time - start_time:.2f}s")
 
     def _compute_scores_batch_core(self, batch_scenario_slice: torch.Tensor, 
                                    active_short_pi_gpu: torch.Tensor, 
@@ -676,10 +678,10 @@ class ArgmaxOperation:
             )
         
         if self.num_pi == 0:
-            print("Warning: No pi vectors stored. Cannot find optimal basis.")
+            self.logger.warning("No pi vectors stored. Cannot find optimal basis.")
             return np.array([]), np.array([]), np.array([])
         if len(scenario_indices) == 0:
-            print("Warning: No scenarios provided. Cannot find optimal basis.")
+            self.logger.warning("No scenarios provided. Cannot find optimal basis.")
             return np.array([]), np.array([]), np.array([])
         if x.shape != (self.X_DIM,):
             raise ValueError("Input x has incorrect shape.")
@@ -1164,14 +1166,14 @@ class ArgmaxOperation:
 
     def _initialize_D_gpu(self):
         """Initialize D matrix on GPU for efficient column slicing."""
-        print(f"[{time.strftime('%H:%M:%S')}] Initializing D matrix on GPU...")
+        self.logger.debug("Initializing D matrix on GPU...")
         # Convert D to dense tensor on GPU for efficient column indexing
         D_dense = torch.from_numpy(self.D.toarray()).to(
             dtype=self.basis_factors_cpu.dtype,
             device=self.device
         )
         self.D_gpu = D_dense
-        print(f"[{time.strftime('%H:%M:%S')}] D matrix cached on GPU: shape {self.D_gpu.shape}")
+        self.logger.debug(f"D matrix cached on GPU: shape {self.D_gpu.shape}")
 
     def _process_factorization_batch(self, batch_vbasis, batch_cbasis, batch_cpu_indices):
         """Process a batch of basis matrices for LU factorization on GPU."""
