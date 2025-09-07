@@ -47,7 +47,7 @@ regularization_control:
   gamma: 0.5
   rho_decrease_factor: 0.5
   rho_increase_factor: 2.0
-  min_rho: 1e-2
+  min_rho: 1
   max_rho: 1e5
 
 # =============================================================================
