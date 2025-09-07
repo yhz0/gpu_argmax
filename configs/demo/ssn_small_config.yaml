@@ -1,41 +1,41 @@
-# BAA99-20 Problem Configuration
+# SSN Small Problem Configuration
 
 # =============================================================================
 # METADATA
 # =============================================================================
 metadata:
-  instance_name: "benders_run_baa99-20"
+  instance_name: "benders_run_ssn_small"
 
 # =============================================================================
 # INPUT FILES
 # =============================================================================
 input_files:
-  smps_core_file: "./smps_data/baa99-20/baa99-20.mps"
-  smps_time_file: "./smps_data/baa99-20/baa99-20.tim"
-  smps_sto_file: "./smps_data/baa99-20/baa99-20.sto"
-  input_h5_basis_file: "./baa99-20_100scen_results.h5"
+  smps_core_file: "./smps_data/ssn/ssn.mps"
+  smps_time_file: "./smps_data/ssn/ssn.tim"
+  smps_sto_file: "./smps_data/ssn/ssn.sto"
+  input_h5_basis_file: "./ssn_100scen_results.h5"
 
 # =============================================================================
 # ARGMAX POOL - GPU Memory and Dual Solution Storage
 # =============================================================================
 argmax_pool:
-  MAX_PI: 200000
+  MAX_PI: 50000
   MAX_OMEGA: 1000000
-  SCENARIO_BATCH_SIZE: 10000
-  NUM_CANDIDATES: 8
-  primal_feas_tol: 1e-3
+  SCENARIO_BATCH_SIZE: 1000
+  NUM_CANDIDATES: 32
+  primal_feas_tol: 1e-2
 
 # =============================================================================
 # ALGORITHM PARAMETERS - Core Algorithm Settings
 # =============================================================================
 algorithm_parameters:
-  ETA_LOWER_BOUND: -1e7
-  NUM_SAMPLES_FOR_POOL: 1000000
-  tolerance: 1.0
+  ETA_LOWER_BOUND: 0.0
+  NUM_SAMPLES_FOR_POOL: 15000
+  tolerance: 1e-4
   num_duals_to_add_per_iteration: 5000
-  argmax_tol_cutoff: 1.0
-  num_workers: 192
-  num_lp_scenarios_per_iteration: 10000
+  argmax_tol_cutoff: 1e-4
+  num_workers: 32
+  num_lp_scenarios_per_iteration: 5000
   lp_scenario_selection_strategy: "systematic"
   max_iterations: 300
 
@@ -47,18 +47,18 @@ regularization_control:
   gamma: 0.5
   rho_decrease_factor: 0.5
   rho_increase_factor: 2.0
-  min_rho: 1e-2
+  min_rho: 1e-5
   max_rho: 1e5
 
 # =============================================================================
 # VALIDATION - Solution Quality Assessment
 # =============================================================================
 validation:
-  enable_validation: true        
-  validation_N1: 200000          
-  validation_N2: 10000000        
+  enable_validation: true
+  validation_N1: 10000
+  validation_N2: 100000
   validation_confidence_level: 0.95
-  validation_seed: 123456        
+  validation_seed: 12345
 
 # =============================================================================
 # LOGGING - Output and Debugging

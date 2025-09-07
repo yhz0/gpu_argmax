@@ -59,7 +59,7 @@ validation:
   validation_N1: 50000                # Number of LP solves for validation
   validation_N2: 1000000              # Number of GPU evaluations for validation
   validation_confidence_level: 0.95   # Confidence level for CI computation
-  validation_seed: 12345              # Random seed for validation scenario generation
+  validation_seed: 123456              # Random seed for validation scenario generation
 
 # =============================================================================
 # LOGGING - Output and Debugging

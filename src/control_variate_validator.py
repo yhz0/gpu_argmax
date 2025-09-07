@@ -166,7 +166,9 @@ class ControlVariateValidator:
         
         # Step 1: Generate independent scenario samples
         logger.info("Generating independent scenario samples...")
+        sampling_start = time.time()
         short_delta_r_omega1, short_delta_r_omega2 = self._generate_scenario_samples(N1, N2)
+        sampling_time = time.time() - sampling_start
         
         # Step 2: GPU control variate computation (large sample N2)
         logger.info(f"Computing control variate estimates using {N2} scenarios...")
@@ -216,6 +218,12 @@ class ControlVariateValidator:
         logger.info(f"Validation complete in {total_time:.2f}s. Second-stage value function E[Q(x,ω)]: {point_estimate:.4f}")
         logger.info(f"Second-stage CI ({confidence_level*100}%): [{confidence_interval[0]:.4f}, {confidence_interval[1]:.4f}]")
         logger.info(f"Second-stage CI width: {confidence_interval[1] - confidence_interval[0]:.4f}")
+        logger.info(f"Timing breakdown:")
+        logger.info(f"  Scenario generation: {sampling_time:.2f}s ({sampling_time/total_time*100:.1f}%)")
+        logger.info(f"  GPU computation: {gpu_time:.2f}s ({gpu_time/total_time*100:.1f}%)")
+        logger.info(f"  LP computation: {lp_time:.2f}s ({lp_time/total_time*100:.1f}%)")
+        other_time = total_time - sampling_time - gpu_time - lp_time
+        logger.info(f"  Other (correction & stats): {other_time:.2f}s ({other_time/total_time*100:.1f}%)")
         
         return result
 
@@ -268,6 +276,9 @@ class ControlVariateValidator:
         
         if num_scenarios <= batch_size:
             # Single batch processing
+            # Disable TF32 for higher precision in validation
+            self.argmax_op._configure_tf32(False)
+            
             self.argmax_op.clear_scenarios()
             self.argmax_op.add_scenarios(short_delta_r_scenarios)
             _, scores = self.argmax_op.find_optimal_basis_fast(x, touch_lru=False)

@@ -450,8 +450,6 @@ class BendersSolver:
             self.logger.info(f"Validation completed successfully in {validation_time:.2f}s")
             self.logger.info(f"Expected total cost (c^T x + E[Q(x,ω)]): {result.expected_total_cost:.6f} [{result.confidence_interval_lower:.6f}, {result.confidence_interval_upper:.6f}]")
             self.logger.info(f"Total cost CI width: {result.confidence_interval_width:.6f}")
-            if result.variance_reduction_ratio is not None:
-                self.logger.info(f"Variance reduction achieved: {result.variance_reduction_ratio*100:.2f}%")
             
             # Write detailed results to log file
             log_dir = Path(self.config.get('log_dir', 'logs'))
