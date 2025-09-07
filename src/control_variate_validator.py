@@ -215,6 +215,7 @@ class ControlVariateValidator:
         
         logger.info(f"Validation complete in {total_time:.2f}s. Second-stage value function E[Q(x,ω)]: {point_estimate:.4f}")
         logger.info(f"Second-stage CI ({confidence_level*100}%): [{confidence_interval[0]:.4f}, {confidence_interval[1]:.4f}]")
+        logger.info(f"Second-stage CI width: {confidence_interval[1] - confidence_interval[0]:.4f}")
         
         return result
 

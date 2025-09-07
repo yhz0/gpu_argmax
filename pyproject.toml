@@ -9,6 +9,7 @@ dependencies = [
     "h5py",
     "cachetools",
     "psutil>=7.0.0",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

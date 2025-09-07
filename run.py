@@ -1,11 +1,12 @@
 import argparse
-import json
 import logging
 import os
 import sys
 
 # Add src directory to Python path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from src.config_loader import ConfigLoader
 
 def main():
     parser = argparse.ArgumentParser(description="A unified command-line interface for the project.")
@@ -29,7 +30,7 @@ def main():
 
     # Incumbent Benders subcommand
     parser_incumbent_benders = subparsers.add_parser("incumbent_benders", help="Run the Benders solver with incumbent strategy.")
-    parser_incumbent_benders.add_argument("--config", type=str, help="Path to a JSON configuration file. Defaults to benders_config.json")
+    parser_incumbent_benders.add_argument("--config", type=str, required=True, help="Path to a YAML configuration file.")
 
     # SMPS reader subcommand
     parser_smps_reader = subparsers.add_parser("smps_reader", help="Run the SMPS reader script.")
@@ -55,14 +56,8 @@ def main():
         builder.run_pipeline(solve_model=True, save_hdf5=True, hdf5_filepath=f"{os.path.basename(args.core_file).split('.')[0]}_{args.num_scenarios}scen_results.h5")
     elif args.command == "incumbent_benders":
         from scripts.run_incumbent_benders_solver import BendersSolver
-        if args.config:
-            config_path = args.config
-        else:
-            # Default to benders_config.json
-            config_path = "benders_config.json"
         
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        config = ConfigLoader.load_yaml_config(args.config)
         
         logging.basicConfig(
             level=logging.INFO, 
@@ -89,9 +84,8 @@ if __name__ == "__main__":
     # import os
     # from scripts.run_incumbent_benders_solver import BendersSolver
     
-    # config_path = "configs/ssn_small_config.json"
-    # with open(config_path, 'r') as f:
-    #     config = json.load(f)
+    # config_path = "configs/ssn_config.yaml"
+    # config = ConfigLoader.load_yaml_config(config_path)
     
     # logging.basicConfig(
     #     level=logging.INFO,

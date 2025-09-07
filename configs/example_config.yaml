@@ -1,0 +1,68 @@
+# Example YAML Configuration for Benders Decomposition Solver
+# This template shows all available configuration parameters organized by category
+
+# =============================================================================
+# METADATA
+# =============================================================================
+metadata:
+  instance_name: "example_instance"  # Identifier for this problem instance
+
+# =============================================================================
+# INPUT FILES
+# =============================================================================
+input_files:
+  smps_core_file: "./smps_data/example/example.mps"  # Core SMPS file path
+  smps_time_file: "./smps_data/example/example.tim"  # Time SMPS file path  
+  smps_sto_file: "./smps_data/example/example.sto"   # Stochastic SMPS file path
+  input_h5_basis_file: "./example_100scen_results.h5"  # HDF5 file containing initial basis and solution
+
+# =============================================================================
+# ARGMAX POOL - GPU Memory and Dual Solution Storage
+# =============================================================================
+argmax_pool:
+  MAX_PI: 100000                    # Maximum number of dual solutions to store
+  MAX_OMEGA: 1000000               # Maximum number of scenarios for GPU operations
+  SCENARIO_BATCH_SIZE: 10000       # Batch size for scenario processing
+  NUM_CANDIDATES: 8                # Number of candidate solutions for argmax
+  primal_feas_tol: 1e-3           # Tolerance for primal feasibility checking
+
+# =============================================================================
+# ALGORITHM PARAMETERS - Core Algorithm Settings
+# =============================================================================
+algorithm_parameters:
+  ETA_LOWER_BOUND: -1e7                           # Lower bound for the eta variable in master problem
+  NUM_SAMPLES_FOR_POOL: 1000000                  # Number of scenarios in the sample pool
+  tolerance: 1e-4                                # Tolerance for cut generation
+  num_duals_to_add_per_iteration: 10000         # Max duals to add per iteration
+  argmax_tol_cutoff: 1e-4                       # Tolerance for argmax cutoff
+  num_workers: 192                               # Number of parallel workers (default: CPU count)
+  num_lp_scenarios_per_iteration: 1000          # Scenarios to solve with LP per iteration
+  lp_scenario_selection_strategy: "systematic"   # Strategy for selecting scenarios ('systematic' or 'random')
+  max_iterations: 300                            # Maximum number of algorithm iterations
+
+# =============================================================================
+# REGULARIZATION CONTROL - Trust Region Parameters
+# =============================================================================
+regularization_control:
+  initial_rho: 1.0              # Initial regularization parameter
+  gamma: 0.5                    # Trust region parameter for successful step acceptance
+  rho_decrease_factor: 0.5      # Factor to decrease rho on successful steps
+  rho_increase_factor: 2.0      # Factor to increase rho on unsuccessful steps
+  min_rho: 1e-5                 # Minimum allowed rho value
+  max_rho: 1e5                  # Maximum allowed rho value
+
+# =============================================================================
+# VALIDATION - Solution Quality Assessment
+# =============================================================================
+validation:
+  enable_validation: true              # Whether to run solution validation
+  validation_N1: 50000                # Number of LP solves for validation
+  validation_N2: 1000000              # Number of GPU evaluations for validation
+  validation_confidence_level: 0.95   # Confidence level for CI computation
+  validation_seed: 12345              # Random seed for validation scenario generation
+
+# =============================================================================
+# LOGGING - Output and Debugging
+# =============================================================================
+logging:
+  log_dir: "logs"  # Directory for log files
